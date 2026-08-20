@@ -83,6 +83,8 @@ The exact time-bin granularity (e.g., 15-minute vs. hourly) is data-dependent an
 
 Final metric selection depends on field availability and quality, to be confirmed in [02_DATA_SOURCES.md](02_DATA_SOURCES.md) during data acquisition.
 
+**Methodological note — interpreting fare-related metrics:** Changes in `fare_amount` or `total_amount` should not automatically be interpreted as changes in pricing or demand. Fare differences may instead be explained by changes in trip distance, duration, or trip composition. Fare-related metrics should therefore be interpreted alongside relevant trip characteristics rather than in isolation.
+
 ---
 
 ## Temporal Analysis

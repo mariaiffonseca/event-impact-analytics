@@ -23,7 +23,7 @@ This project is a **Data Science research / analytics project**, not a product a
 
 **Main dataset candidate:** NYC Yellow Taxi trip records, published by the NYC Taxi & Limousine Commission (TLC).
 
-**Initial period:** 2019, subject to validation of data coverage and completeness. 2019 was selected as a stable, well-documented, pre-pandemic reference year; the project targets the full calendar year, but actual usable coverage will be confirmed during data acquisition rather than assumed in advance.
+**Initial period:** 2019, subject to validation of data coverage and completeness. 2019 was selected as a stable, well-documented, pre-pandemic reference year; the project initially targets the full 2019 calendar year, but actual usable coverage must be validated during data acquisition rather than assumed in advance. If specific months or periods are found to be incomplete or otherwise unsuitable, the analysis may proceed on a validated subset of the year rather than the full calendar year.
 
 **Event case study:** New York Yankees regular-season home games at Yankee Stadium (Bronx, NY), 2019 season.
 
