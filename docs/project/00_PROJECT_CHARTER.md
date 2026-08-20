@@ -3,7 +3,7 @@
 | Field | Value |
 |--------|-------|
 | Name | Event Impact Analytics — Project Charter |
-| Version | 1.0.0 |
+| Version | 1.1.0 |
 | Status | Draft |
 | Last Updated | 2026-08-20 |
 
@@ -23,9 +23,9 @@ This project is a **Data Science research / analytics project**, not a product a
 
 **Main dataset candidate:** NYC Yellow Taxi trip records, published by the NYC Taxi & Limousine Commission (TLC).
 
-**Initial period:** 2019 (full calendar year, chosen as a stable, well-documented, pre-pandemic reference period; the final period boundaries remain subject to confirmation once the data is acquired and validated).
+**Initial period:** 2019, subject to validation of data coverage and completeness. 2019 was selected as a stable, well-documented, pre-pandemic reference year; the project targets the full calendar year, but actual usable coverage will be confirmed during data acquisition rather than assumed in advance.
 
-**Event case study:** New York Yankees home games at Yankee Stadium (Bronx, NY), 2019 season.
+**Event case study:** New York Yankees regular-season home games at Yankee Stadium (Bronx, NY), 2019 season.
 
 Large recurring public events — such as professional sporting events — are commonly assumed to draw noticeable local transportation demand, but the actual magnitude, timing, and spatial extent of that demand is not obvious without empirical analysis grounded in real trip-level data. This project uses Yankee Stadium home games as a case study to investigate that question using publicly available taxi trip data.
 
@@ -49,7 +49,7 @@ This question is used as the guiding framing for the project. It is stated in pl
 
 1. Determine whether taxi activity around Yankee Stadium shows an observable, associated change during periods surrounding home games, compared to comparable non-game periods.
 2. Characterize the temporal pattern of any observed change (e.g., how it evolves before and after a game).
-3. Characterize the spatial pattern of any observed change (e.g., whether it decreases with distance from the stadium).
+3. Characterize the spatial pattern of any observed change (e.g., whether its magnitude varies with distance from the stadium).
 4. Characterize whether trip characteristics (duration, distance, fare) change around home games.
 5. As an optional extension, explore whether game attendance is associated with the magnitude of any observed change, contingent on validating suitable attendance data.
 6. Produce a transparent, reproducible analysis with explicitly documented assumptions, limitations, and confounders — suitable as a Data Science portfolio artifact.
@@ -62,7 +62,7 @@ This question is used as the guiding framing for the project. It is stated in pl
 
 - NYC Yellow Taxi trip records for the 2019 calendar year (or a validated subset thereof).
 - Taxi zones in the vicinity of Yankee Stadium and a set of comparison/control zones.
-- The 2019 Yankees home-game schedule at Yankee Stadium.
+- The 2019 Yankees regular-season home-game schedule at Yankee Stadium.
 - Descriptive and inferential analysis of taxi demand and trip characteristics relative to game timing and location.
 - Documentation of the analytical approach, assumptions, and limitations at each stage.
 - Optionally, game attendance data and/or weather data, if later validated as available and relevant.
@@ -72,6 +72,7 @@ This question is used as the guiding framing for the project. It is stated in pl
 - Other NYC vehicle-for-hire data (green taxis, for-hire vehicles / rideshare) unless a future PR justifies adding them.
 - Other stadiums, teams, or event types.
 - Years other than 2019, unless a future PR justifies extending the period.
+- Yankees postseason games, unless a future PR deliberately expands the project scope.
 - Real-time or streaming data.
 
 ---
@@ -93,6 +94,7 @@ This question is used as the guiding framing for the project. It is stated in pl
 - A documented characterization of how the observed change varies with distance from Yankee Stadium.
 - A comparison of trip-level characteristics (duration, distance, fare) between game-related and non-game periods.
 - Statistical analysis results (e.g., estimated effect sizes, comparisons, or model outputs) with explicit uncertainty and limitations, using an approach justified by the data rather than fixed in advance.
+- A reproducible analytical pipeline documenting the transformation from raw public data sources to the analytical dataset and final reported results.
 - A written summary of findings, including an honest account of what the data does and does not support.
 - Optionally, an analysis of the association between game attendance and observed mobility change.
 
@@ -154,6 +156,9 @@ The project overall is successful when:
 ---
 
 ## Changelog
+
+### 1.1.0
+Clarified that 2019 data coverage and completeness require validation rather than being assumed; made the spatial objective direction-neutral; scoped the event case study explicitly to 2019 regular-season home games (postseason out of scope); added a reproducible analytical pipeline to Expected Analytical Outputs.
 
 ### 1.0.0
 Initial version, created under PR-002 (Project Definition).
