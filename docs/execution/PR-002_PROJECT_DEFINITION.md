@@ -3,7 +3,7 @@
 | Field | Value |
 |--------|-------|
 | Name | PR-002 — Project Definition |
-| Version | 1.0.0 |
+| Version | 1.1.0 |
 | Status | Draft |
 | Last Updated | 2026-08-20 |
 
@@ -47,7 +47,7 @@ Produce three project-specific documents that together define the project clearl
 
 - Writing the three project-definition documents listed above.
 - Defining the research question, objectives, scope, and non-goals for the project.
-- Documenting initial hypotheses (H1–H5) as working hypotheses, not established facts.
+- Documenting initial hypotheses (H1–H4) as core working hypotheses, plus H5 as an optional extension contingent on the availability and quality of game-level attendance data — all treated as working hypotheses, not established facts.
 - Describing candidate analytical approaches (temporal analysis, spatial analysis, baselines, comparison/control strategies, statistical methods) at the level of documented options and trade-offs, explicitly distinguishing planned, candidate, and data-dependent decisions.
 - Inventorying all currently known data sources, documenting what is known and explicitly flagging what remains unverified.
 
@@ -88,7 +88,7 @@ Must define:
 
 - Main research question
 - Analytical questions
-- Initial hypotheses (H1–H5)
+- Initial hypotheses (H1–H4, plus H5 as an optional extension)
 - Unit(s) of analysis
 - Candidate metrics
 - Temporal analysis
@@ -103,7 +103,7 @@ Must define:
 - Optional extensions
 - Analytical limitations
 
-Hypotheses must be presented as working hypotheses to be investigated, not established facts. The document must not prematurely lock in a fixed event window, a specific baseline, a specific control group, a specific statistical test, or a specific causal inference method — these are documented as candidates or as dependent on later data validation.
+Hypotheses must be presented as working hypotheses to be investigated, not established facts. H1–H4 are the core working hypotheses; H5 is an optional extension contingent on the availability and quality of game-level attendance data. The document must not prematurely lock in a fixed event window, a specific baseline, a specific control group, a specific statistical test, or a specific causal inference method — these are documented as candidates or as dependent on later data validation.
 
 ### 3. `docs/project/02_DATA_SOURCES.md`
 
@@ -111,7 +111,7 @@ Must contain a structured inventory of all currently known data sources:
 
 1. NYC Taxi & Limousine Commission Yellow Taxi Trip Records
 2. NYC Taxi Zone Lookup / geographic data
-3. New York Yankees 2019 home-game schedule
+3. New York Yankees 2019 regular-season home-game schedule
 4. Weather data, as a potential source, deferred pending later validation of necessity
 
 For each source, document where possible: source name, provider, purpose, URL, data format, temporal coverage, spatial coverage, relevant fields, expected granularity, acquisition method, licensing/usage considerations, limitations, and validation status. The document must clearly distinguish confirmed sources, candidate sources, and information that still requires validation. No dataset field or source capability may be asserted without a basis in publicly available documentation; anything not directly verified is explicitly marked as requiring validation.
@@ -125,7 +125,7 @@ This PR is complete when:
 - [ ] All three documents exist at their specified paths.
 - [ ] The project's research question is explicitly defined.
 - [ ] Scope and non-goals are clear.
-- [ ] Initial hypotheses (H1–H5) are documented as hypotheses, not facts.
+- [ ] Initial hypotheses (H1–H4) are documented as core hypotheses, and H5 is documented as an optional extension contingent on attendance data availability and quality — none presented as established facts.
 - [ ] The analytical strategy is described without prematurely locking in implementation details (fixed event window, baseline, control group, statistical test, or causal method).
 - [ ] Candidate baselines and comparison/control strategies are documented.
 - [ ] Temporal and spatial analysis approaches are covered.
@@ -133,6 +133,7 @@ This PR is complete when:
 - [ ] All currently known data sources are documented in `02_DATA_SOURCES.md`.
 - [ ] Unknown or unverified information is clearly marked as requiring validation.
 - [ ] The three documents are internally consistent with each other and with this PR specification.
+- [ ] The research question, analytical questions, hypotheses, and project objectives are internally consistent with one another.
 - [ ] No implementation code or downloaded datasets are introduced by this PR.
 
 ---
@@ -156,6 +157,9 @@ This PR is complete when:
 ---
 
 ## Changelog
+
+### 1.1.0
+Clarified H5 as an optional extension dependent on attendance data availability and quality (Scope, Deliverables, Acceptance Criteria); added an acceptance criterion requiring internal consistency across the research question, analytical questions, hypotheses, and objectives.
 
 ### 1.0.0
 Initial version.
