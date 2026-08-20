@@ -3,7 +3,7 @@
 | Field | Value |
 |--------|-------|
 | Name | Event Impact Analytics — Data Sources |
-| Version | 1.0.0 |
+| Version | 1.1.0 |
 | Status | Draft |
 | Last Updated | 2026-08-20 |
 
@@ -67,20 +67,20 @@ No source in this document is marked "Confirmed" in the sense of fully verified 
 
 ---
 
-## Source 3: New York Yankees 2019 Home Game Schedule
+## Source 3: New York Yankees 2019 Regular-Season Home Game Schedule
 
 | Field | Value |
 |---|---|
-| **Source name** | New York Yankees 2019 Home Game Schedule (and, optionally, attendance) |
-| **Provider** | Candidate sources — Retrosheet (`retrosheet.org`); Baseball-Reference (`baseball-reference.com`); Baseball Almanac (`baseball-almanac.com`). No single provider has been selected. |
-| **Purpose** | Identify the dates and start times of all 2019 Yankees home games at Yankee Stadium, used to define event windows for the core analysis (H1–H4). Optionally, provide per-game attendance figures for the H5 extension. |
+| **Source name** | New York Yankees 2019 Regular-Season Home Game Schedule (and, optionally, attendance) |
+| **Provider** | Candidate sources, with distinct intended roles, none yet definitively selected — **Retrosheet** (`retrosheet.org`), the preferred/primary candidate as a structured, programmatically accessible source; **Baseball-Reference** (`baseball-reference.com`), a secondary source intended for cross-validation of the primary source; **Baseball Almanac** (`baseball-almanac.com`), an alternative/fallback source if the preferred sources prove insufficient. Final selection is deferred to data acquisition. |
+| **Purpose** | Identify the dates and start times of all 2019 Yankees regular-season home games at Yankee Stadium, used to define event windows for the core analysis (H1–H4). Optionally, provide per-game attendance figures for the H5 extension. |
 | **URL** | Retrosheet season game logs: `https://www.retrosheet.org/gamelogs`; Retrosheet event files: `https://www.retrosheet.org/eventfile.htm`. Baseball-Reference schedule/results page: `https://www.baseball-reference.com/teams/NYY/2019-schedule-scores.shtml`. Baseball Almanac schedule page: `https://www.baseball-almanac.com/teamstats/schedule.php?y=2019&t=NYA`. |
 | **Data format** | Retrosheet: structured, delimited game log / event files intended for programmatic use. Baseball-Reference and Baseball Almanac: HTML tables, which would require scraping if used. |
-| **Temporal coverage** | Full 2019 MLB regular season (approx. late March–September 2019). Postseason games are not currently assumed to be in scope (the Yankees' 2019 postseason run, if included, would need a separate, explicit scope decision) — **requires validation/decision** in a later PR. |
+| **Temporal coverage** | Full 2019 MLB regular season (approx. late March–September 2019). Per project scope ([00_PROJECT_CHARTER.md](00_PROJECT_CHARTER.md)), Yankees postseason games are out of scope for this project unless a future PR deliberately expands it. |
 | **Spatial coverage** | Single venue: Yankee Stadium, Bronx, NY. Only home games are relevant to this project; away games are out of scope for event-window definition. |
 | **Relevant fields** | Candidate, per Retrosheet's publicly documented game log structure: game date, home team, away team, start time, attendance, game site/venue. **Requires validation** against the actual downloaded files — exact field names and structure have not been directly inspected. |
 | **Expected granularity** | One record per game. |
-| **Acquisition method** | Not yet determined. Direct download from a structured source (e.g., Retrosheet) is preferred over HTML scraping where possible. To be finalized during data acquisition. |
+| **Acquisition method** | Not yet determined. Retrosheet, as the preferred/primary candidate, would be acquired via direct structured download; Baseball-Reference would be used for cross-validation and Baseball Almanac as an alternative/fallback if needed, both of which would require scraping if used. Direct download from a structured source is preferred over HTML scraping where possible. To be finalized during data acquisition. |
 | **Licensing / usage considerations** | Retrosheet publishes data for research and non-commercial use under its own notice (`https://www.retrosheet.org/datause.txt`); terms must be reviewed before acquisition. If Baseball-Reference or Baseball Almanac are used instead or as cross-validation, their respective terms of use must be reviewed and respected. |
 | **Limitations** | Reported attendance figures (if used for H5) are typically announced or ticketed attendance rather than verified turnstile counts, and may not closely track actual mobility demand. Schedule data should be cross-validated across sources, since games are occasionally rescheduled (e.g., due to weather) or played as part of doubleheaders. |
 | **Validation status** | **Candidate.** General existence and structure of these sources verified against public documentation on 2026-08-20. Exact schedule and attendance data, field-level schema, and licensing terms **require validation** during data acquisition. Per the project's methodological principles, attendance data specifically must be validated for availability and quality before H5 is pursued. |
@@ -113,7 +113,7 @@ No source in this document is marked "Confirmed" in the sense of fully verified 
 |---|--------|--------|----------------------------------------|
 | 1 | NYC Yellow Taxi Trip Records | Candidate | Yes |
 | 2 | NYC Taxi Zone Lookup / Geographic Data | Candidate | Yes |
-| 3 | NY Yankees 2019 Home Game Schedule (+ attendance) | Candidate | Yes (schedule); attendance only for optional H5 |
+| 3 | NY Yankees 2019 Regular-Season Home Game Schedule (+ attendance) | Candidate | Yes (schedule); attendance only for optional H5 |
 | 4 | NOAA Weather Data | Deferred | No — only if later validated as necessary |
 
 ---
@@ -127,6 +127,9 @@ No source in this document is marked "Confirmed" in the sense of fully verified 
 ---
 
 ## Changelog
+
+### 1.1.0
+Clarified primary/secondary/fallback roles among the candidate Yankees schedule sources (Retrosheet, Baseball-Reference, Baseball Almanac); confirmed regular-season scope for the Yankees schedule source, consistent with the Project Charter.
 
 ### 1.0.0
 Initial version, created under PR-002 (Project Definition).
