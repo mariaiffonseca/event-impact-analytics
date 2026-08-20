@@ -3,7 +3,7 @@
 | Field | Value |
 |--------|-------|
 | Name | Event Impact Analytics — Analytical Plan |
-| Version | 1.0.0 |
+| Version | 1.1.0 |
 | Status | Draft |
 | Last Updated | 2026-08-20 |
 
@@ -27,13 +27,15 @@ No implementation choice in this document should be read as final. Fixed paramet
 
 As stated in [00_PROJECT_CHARTER.md](00_PROJECT_CHARTER.md), this is an observational study. See [Association vs. Causality](#association-vs-causality).
 
+This plan applies to 2019 regular-season home games at Yankee Stadium, consistent with the project scope defined in [00_PROJECT_CHARTER.md](00_PROJECT_CHARTER.md); postseason games are out of scope unless a future PR deliberately expands the project.
+
 ---
 
 ## Analytical Questions
 
 1. Is taxi activity around Yankee Stadium higher during periods surrounding home games than during comparable non-game periods?
 2. When does any observed effect appear, relative to the game — i.e., how does it behave before and after the game?
-3. Does the magnitude of any observed change decrease with distance from Yankee Stadium?
+3. Does the magnitude of any observed change vary with distance from Yankee Stadium?
 4. Do trip characteristics such as duration, distance, and fare change around home games?
 5. *(Optional extension)* Is game attendance associated with the magnitude of any observed mobility change?
 
@@ -47,7 +49,7 @@ These are working hypotheses to be investigated, not established facts. They wil
 
 **H2** — The increase in taxi activity is concentrated in specific periods before and after the game, rather than spread uniformly across a wide time span.
 
-**H3** — The magnitude of the observed change decreases with distance from Yankee Stadium.
+**H3** — The magnitude of the observed change varies with distance from Yankee Stadium, with a stronger effect expected closer to the stadium.
 
 **H4** — Home games are associated with changes in trip characteristics such as trip duration, distance, and fare.
 
@@ -62,8 +64,11 @@ Candidate units, to be finalized once data volume and structure are validated:
 - **Trip-level records** — individual taxi trips, as originally published.
 - **Zone × time-bin aggregates** — trip counts (and other metrics) aggregated per taxi zone per time interval (e.g., hourly). Likely primary unit for demand analysis.
 - **Game-level aggregates** — summary statistics computed per game across a defined window, used to compare across games (e.g., for H5).
+- **Game × zone × time-bin** — a candidate unit combining game identity with zone and time-bin, potentially useful for comparing spatial and temporal patterns across individual games. Candidate and data-dependent; not yet adopted.
 
 The exact time-bin granularity (e.g., 15-minute vs. hourly) is data-dependent and will be chosen based on data volume, noise level, and the resolution needed to resolve the temporal questions in H2.
+
+**Methodological note — trip-level records and inference:** Individual trip records are the raw, source-level observations from which the higher-level analytical units above (zone × time-bin, game-level, game × zone × time-bin) are constructed. Millions of individual trips should not be implicitly treated as independent observations for statistical inference: trips are clustered within games, time periods, taxi zones, and potentially other relevant groups. Statistical inference must account for this clustering/dependence where applicable, in order to avoid pseudoreplication or an artificially inflated effective sample size. The specific technique used to address this (e.g., appropriate aggregation, clustered/robust variance estimation, or hierarchical modeling) is not prescribed here and will be chosen and justified once real data is available (see [Candidate Statistical Approaches](#candidate-statistical-approaches)).
 
 ---
 
@@ -97,7 +102,12 @@ Final metric selection depends on field availability and quality, to be confirme
 
 **Candidate approach:** Order or group taxi zones by distance from the stadium (e.g., the zone containing the stadium, then progressively more distant zones or distance bands) and compare the magnitude of any observed change across groups.
 
-**Data-dependent:** The exact zone(s) corresponding to Yankee Stadium, and the distance metric used (e.g., zone centroid distance vs. shared-border adjacency), depend on validating the taxi zone geometry described in [02_DATA_SOURCES.md](02_DATA_SOURCES.md). This has not been done as part of this PR.
+**Data-dependent:** The exact zone(s) corresponding to Yankee Stadium, and the spatial methodology used to relate other zones to it, depend on validating the taxi zone geometry described in [02_DATA_SOURCES.md](02_DATA_SOURCES.md). This has not been done as part of this PR. Candidate approaches include:
+
+- *Distance-based approaches* — zone centroid or representative-point distance to Yankee Stadium, and/or grouping zones into distance bands.
+- *Spatial relationship approaches* — adjacent or neighbouring zones. Adjacency describes a spatial relationship between zones, not a distance measurement, and should not be treated as an equivalent or interchangeable distance metric.
+
+The specific methodology (or combination) used will be chosen once the zone geometry is validated.
 
 ---
 
@@ -113,8 +123,9 @@ Candidates, not yet chosen:
 
 - **Temporal baseline** — the same taxi zone(s) on comparable non-game days/times (e.g., matched by day of week and season, excluding known holidays or other major events where feasible).
 - **Typical pattern baseline** — a historical average or typical activity profile per zone per time-of-week, against which game-day observations are compared.
+- **Matched game/non-game comparison** — comparing a game period against comparable non-game periods explicitly matched on relevant temporal characteristics such as day of week, time of day, season/month, and other relevant factors identified later.
 
-The choice between these (or a combination) depends on how much non-game variability is observed in the data and is deferred to a later PR.
+The choice among these (or a combination) depends on how much non-game variability is observed in the data and is deferred to a later PR.
 
 ---
 
@@ -124,7 +135,7 @@ Candidates, not yet chosen:
 
 - **Comparable non-game period comparison** — as described under Baseline Strategies.
 - **Spatial control areas** — zones with broadly similar characteristics (e.g., similar borough, density, or baseline traffic level) but without a major venue nearby, used to help separate citywide temporal trends from a stadium-specific effect.
-- **Difference-in-differences framing** — comparing (stadium-area zones vs. control zones) × (game days vs. non-game days). This is a candidate only, contingent on the data supporting the assumptions such an approach requires (e.g., reasonably parallel trends in the absence of games). Whether this is appropriate will be assessed, not assumed.
+- **Difference-in-differences framing** — comparing (stadium-area zones vs. control zones) × (game days vs. non-game days). This is a candidate only. Its suitability depends not only on identifying an adequate comparison group, but also on whether the available data provides a reasonable basis for assessing the assumptions such an approach requires (e.g., reasonably parallel trends between treated and control zones in the absence of games). Whether this is appropriate — and whether those assumptions can be adequately assessed with the available data — will be evaluated, not assumed; difference-in-differences is not committed to as the project's analytical method.
 
 ---
 
@@ -202,6 +213,9 @@ Planned in principle, to be made concrete once a primary analytical approach is 
 ---
 
 ## Changelog
+
+### 1.1.0
+Revised H3 and Analytical Question 3 to be direction-neutral regarding distance; added a methodological note on trip-level clustering/dependence and pseudoreplication risk; added game × zone × time-bin as a candidate unit of analysis; added matched game/non-game comparison as a candidate baseline; strengthened the difference-in-differences caveat regarding assessability of parallel trends; distinguished distance-based approaches from spatial-relationship (adjacency) approaches; clarified regular-season scope.
 
 ### 1.0.0
 Initial version, created under PR-002 (Project Definition).
