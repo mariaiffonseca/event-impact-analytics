@@ -1,12 +1,13 @@
 """NYC TLC Yellow Taxi trip data — acquisition and source validation.
 
-PR-003 scope: acquire and validate a single-month slice (2019-01) to establish the real
-schema, coverage, and data-quality profile before committing to a full-year acquisition
-strategy. Downloading and validating the remaining 11 months is PR-004's job, reusing the
-functions here.
+PR-003 acquired and validated a single-month slice (2019-01) to establish the real schema,
+coverage, and data-quality profile. PR-004 reuses `download_month()` / `inspect_schema()` /
+`validate_month()` unchanged, once per month, to acquire and validate the full 2019 calendar
+year (`acquire_and_validate_year()` / `aggregate_issue_counts()` below).
 
 All inspection is done via PyArrow Parquet metadata and DuckDB querying the Parquet file
-directly — the file is never loaded into memory as a whole (no `pandas.read_parquet()`).
+directly — the file is never loaded into memory as a whole (no `pandas.read_parquet()`), and
+each month is validated independently (no 12-month in-memory concat).
 """
 
 from __future__ import annotations
@@ -44,6 +45,12 @@ REQUIRED_COLUMNS = [
 # used as a WARNING-level sanity check only; the authoritative check against the real zone
 # lookup table happens in PR-005 once that data is acquired.
 _PLAUSIBLE_LOCATION_ID_RANGE = (1, 265)
+
+# Confirmed present in 2019-01 but not guaranteed for every month (see PR-003's
+# 03_DATA_ACQUISITION.md) — reported as an informational diagnostic, not a hard requirement.
+OPTIONAL_DIAGNOSTIC_COLUMNS = ["congestion_surcharge", "airport_fee"]
+
+YEAR_MONTHS_2019 = [f"2019-{month:02d}" for month in range(1, 13)]
 
 
 def raw_path_for(year_month: str) -> Path:
@@ -244,6 +251,24 @@ def validate_month(path: Path, year_month: str) -> ValidationReport:
         problem_message="exact duplicate rows",
     )
 
+    for column in OPTIONAL_DIAGNOSTIC_COLUMNS:
+        if column not in columns:
+            report.add(
+                f"optional_column_absent:{column}",
+                Severity.INFO,
+                f"{column} is not present in this month's schema",
+            )
+            continue
+        check_count(
+            report,
+            f"optional_column_null:{column}",
+            count_where(f"{column} IS NULL"),
+            total=total,
+            ok_message=f"{column} present with no nulls",
+            problem_message=f"{column} present but null for some rows",
+            severity=Severity.INFO,
+        )
+
     return report
 
 
@@ -257,8 +282,60 @@ def run_validation_slice(year_month: str = "2019-01") -> tuple[TaxiSliceProfile,
     return profile, report
 
 
+@dataclass
+class MonthResult:
+    year_month: str
+    profile: TaxiSliceProfile
+    report: ValidationReport
+
+
+def acquire_and_validate_year(year_months: list[str] = YEAR_MONTHS_2019) -> list[MonthResult]:
+    """Download (if needed) and validate every month in `year_months`, independently.
+
+    No month's failure stops the others — if a month can't be downloaded or its schema is
+    invalid, that's itself a finding to document (see `03_DATA_ACQUISITION.md`), not a reason
+    to silently drop the month from the results.
+    """
+    results = []
+    for year_month in year_months:
+        profile, report = run_validation_slice(year_month)
+        results.append(MonthResult(year_month=year_month, profile=profile, report=report))
+    return results
+
+
+def aggregate_issue_counts(results: list[MonthResult]) -> dict[str, int]:
+    """Sum each check's row count across all months (checks with no count, i.e. no problem
+    found that month, contribute 0)."""
+    totals: dict[str, int] = {}
+    for result in results:
+        for issue in result.report.issues:
+            totals[issue.check] = totals.get(issue.check, 0) + (issue.count or 0)
+    return totals
+
+
 if __name__ == "__main__":
-    profile, report = run_validation_slice()
-    print(profile)
-    print()
-    print(report.summary())
+    import argparse
+
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "--full-year",
+        action="store_true",
+        help="Acquire and validate all 12 months of 2019 instead of just the 2019-01 slice.",
+    )
+    args = parser.parse_args()
+
+    if args.full_year:
+        year_results = acquire_and_validate_year()
+        for month_result in year_results:
+            print(month_result.profile)
+            print(month_result.report.summary())
+            print()
+        total_rows = sum(r.profile.row_count for r in year_results)
+        total_bytes = sum(r.profile.file_size_bytes for r in year_results)
+        print(f"TOTAL: {total_rows:,} rows across {len(year_results)} months, {total_bytes:,} bytes")
+        print(f"Aggregate issue counts: {aggregate_issue_counts(year_results)}")
+    else:
+        slice_profile, slice_report = run_validation_slice()
+        print(slice_profile)
+        print()
+        print(slice_report.summary())
