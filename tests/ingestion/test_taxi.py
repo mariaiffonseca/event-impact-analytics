@@ -244,3 +244,86 @@ def test_validate_month_detects_invalid_passenger_count_and_distance(fixture_mon
     report = taxi.validate_month(path, year_month)
     assert issue(report, "invalid_passenger_count").count == 1
     assert issue(report, "invalid_trip_distance").count == 1
+
+
+def test_validate_month_flags_optional_columns_absent_when_missing(fixture_month):
+    # The fixture's rows don't include congestion_surcharge / airport_fee at all — a
+    # realistic case for months where TLC hadn't yet added a field.
+    path, year_month = fixture_month
+    report = taxi.validate_month(path, year_month)
+    for column in taxi.OPTIONAL_DIAGNOSTIC_COLUMNS:
+        absent_issue = issue(report, f"optional_column_absent:{column}")
+        assert absent_issue.severity.value == "info"
+
+
+def test_validate_month_reports_optional_column_nulls_when_present(tmp_path):
+    rows = [
+        {"tpep_pickup_datetime": "2019-01-05 08:00:00", "congestion_surcharge": 2.5, **VALID_ROW,
+         "tpep_dropoff_datetime": "2019-01-05 08:20:00"},
+        {"tpep_pickup_datetime": "2019-01-05 09:00:00", "congestion_surcharge": None, **VALID_ROW,
+         "tpep_dropoff_datetime": "2019-01-05 09:20:00"},
+    ]
+    df = pd.DataFrame(rows)
+    df["tpep_pickup_datetime"] = pd.to_datetime(df["tpep_pickup_datetime"])
+    df["tpep_dropoff_datetime"] = pd.to_datetime(df["tpep_dropoff_datetime"])
+    path = tmp_path / "yellow_tripdata_2019-01.parquet"
+    df.to_parquet(path, engine="pyarrow", index=False)
+
+    report = taxi.validate_month(path, "2019-01")
+
+    null_issue = issue(report, "optional_column_null:congestion_surcharge")
+    assert null_issue.count == 1
+    assert null_issue.severity.value == "info"
+
+
+def test_acquire_and_validate_year_runs_one_slice_per_month(monkeypatch, fixture_month):
+    path, year_month = fixture_month
+    calls: list[str] = []
+
+    def fake_run_validation_slice(requested_year_month: str = "2019-01"):
+        calls.append(requested_year_month)
+        return taxi.inspect_schema(path, year_month), taxi.validate_month(path, year_month)
+
+    monkeypatch.setattr(taxi, "run_validation_slice", fake_run_validation_slice)
+
+    results = taxi.acquire_and_validate_year(["2019-01", "2019-02"])
+
+    assert calls == ["2019-01", "2019-02"]
+    assert [r.year_month for r in results] == ["2019-01", "2019-02"]
+    assert all(isinstance(r, taxi.MonthResult) for r in results)
+
+
+def test_aggregate_issue_counts_sums_across_months():
+    def make_report(dropoff_before_pickup_count: int) -> taxi.ValidationReport:
+        report = taxi.ValidationReport(source="test")
+        report.add(
+            "dropoff_before_pickup",
+            taxi.Severity.ERROR,
+            "rows where dropoff precedes pickup",
+            count=dropoff_before_pickup_count,
+        )
+        report.add("required_columns", taxi.Severity.INFO, "all required columns present")
+        return report
+
+    profile_stub = taxi.TaxiSliceProfile(
+        year_month="2019-01",
+        file_size_bytes=1,
+        row_count=1,
+        columns=[],
+        min_pickup="",
+        max_pickup="",
+        min_dropoff="",
+        max_dropoff="",
+        pickup_datetime_tz=None,
+        pickup_hour_histogram=[],
+    )
+    results = [
+        taxi.MonthResult(year_month="2019-01", profile=profile_stub, report=make_report(2)),
+        taxi.MonthResult(year_month="2019-02", profile=profile_stub, report=make_report(3)),
+    ]
+
+    totals = taxi.aggregate_issue_counts(results)
+
+    assert totals["dropoff_before_pickup"] == 5
+    # An issue with no count (info, no problem found) contributes 0, not a missing key.
+    assert totals["required_columns"] == 0
