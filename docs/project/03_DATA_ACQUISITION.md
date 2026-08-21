@@ -3,9 +3,9 @@
 | Field | Value |
 |--------|-------|
 | Name | Event Impact Analytics — Data Acquisition |
-| Version | 1.0.1 |
-| Status | Draft (living document — extended by PR-004 and PR-005) |
-| Last Updated | 2026-09-01 |
+| Version | 1.1.0 |
+| Status | Draft — finalized by this PR for the sources in its scope (taxi zones, Yankees schedule); the taxi section is separately extended by PR-004, which branches from PR-003 in parallel with this PR — see the note under [Changelog](#changelog) about reconciling the two at merge time |
+| Last Updated | 2026-09-02 |
 
 ---
 
@@ -189,49 +189,142 @@ own no-accuracy-guarantee disclaimer:
 
 ---
 
-## Source 2: NYC Taxi Zone Lookup / Geographic Data — Deferred to PR-005
+## Source 2: NYC Taxi Zone Lookup / Geographic Data
 
-Not acquired in this PR. Reachability was checked during planning (read-only, not treated as
-acquisition):
+### Acquisition — Confirmed (PR-005)
 
-- `https://d37ci6vzurychx.cloudfront.net/misc/taxi_zone_lookup.csv` — reachable; header
-  confirmed as `LocationID, Borough, Zone, service_zone`, matching `02_DATA_SOURCES.md`'s
-  expectation exactly.
-- `https://d37ci6vzurychx.cloudfront.net/misc/taxi_zones.zip` — reachable; confirmed to be a
-  real Shapefile archive (`.shp`/`.dbf`/`.prj`/`.cpg`), ~1 MB.
+- **Lookup table:** `https://d37ci6vzurychx.cloudfront.net/misc/taxi_zone_lookup.csv` — CSV,
+  downloaded via `taxi_zones.download_lookup()`.
+- **Geometry:** `https://d37ci6vzurychx.cloudfront.net/misc/taxi_zones.zip` — a Shapefile
+  archive, downloaded via `taxi_zones.download_geometry()` and extracted with `zipfile`.
+  **Implementation note:** the zip's own top-level entry is already a `taxi_zones/` folder —
+  extracting it into a same-named subdirectory of the destination doubly-nests the path
+  (`taxi_zones/taxi_zones/taxi_zones.shp` instead of `taxi_zones/taxi_zones.shp`). Fixed by
+  extracting directly into the raw-data directory, not a subdirectory of it.
+- Retrieved 2026-08-21. Provenance sidecars recorded for both files.
 
-Full acquisition, LocationID-uniqueness validation, geometry/CRS validation, compatibility
-cross-check against the taxi `PULocationID`/`DOLocationID` values above (this PR's slice can
-be reused for that — no need to wait for PR-004's full year), and Yankee Stadium zone
-identification are all PR-005's scope.
+### Validation results — Confirmed (PR-005)
 
-## Source 3: NY Yankees 2019 Regular-Season Home Game Schedule — Deferred to PR-005
+**Lookup table** (265 rows):
 
-Not acquired in this PR. Reachability was checked during planning:
+| Check | Result |
+|---|---|
+| Required columns (`LocationID`, `Borough`, `Zone`, `service_zone`) | OK — all present |
+| `LocationID` uniqueness | OK — all 265 unique |
+| Null `Zone` / `Borough` | **1 row**: `LocationID 264`, `Borough="Unknown"`, `Zone=NaN`, `service_zone=NaN` — the TLC placeholder for "location not recorded," not a data error |
 
-- `https://www.retrosheet.org/gamelogs/gl2019.zip` — reachable. Confirmed **regular-season
-  only** (Retrosheet distributes postseason game logs as separate archives), which lines up
-  directly with this project's regular-season-only scope.
-- Confirmed fields present in the Retrosheet game log format: date, visiting/home team, park
-  ID, attendance, and game duration in minutes.
-- **Discovery relative to PR-002:** there is **no game start-time (clock) field** in
-  Retrosheet's game logs — only a day/night indicator and game duration. PR-002's initial
-  assumption ("a sufficiently accurate schedule with dates **and start times**") is only
-  partly correct: dates are reliably available from Retrosheet, but a clock start time is
-  not. If a start-time field ends up necessary for the event-window methodology, PR-005 will
-  need another source for it (e.g. Baseball-Reference) — not assumed resolved here.
-- `https://www.nyc.gov/site/tlc/about/tlc-trip-record-data.page` and
-  `https://www.baseball-reference.com/teams/NYY/2019-schedule-scores.shtml` both returned
-  HTTP 403 to a plain fetch during reachability checking — basic bot-blocking on their HTML
-  pages (the TLC data files themselves, served from CloudFront, are unaffected). **Unresolved,
-  for PR-005:** acquisition code will need a realistic `User-Agent` (already the default in
-  `src/event_impact/ingestion/common/http.py`); if Baseball-Reference remains blocked even
-  with that, cross-validation there may have to be a documented best-effort/manual step
-  rather than fully automated.
+`LocationID` range is **1–265** (confirmed, not the "commonly cited 263" PR-002 flagged as
+needing validation) — 263 real geographic zones plus two placeholder codes: `264`
+(`Borough="Unknown"`, no zone/service_zone) and `265` (`Zone="Outside of NYC"`, no
+borough/service_zone). This confirms the `_PLAUSIBLE_LOCATION_ID_RANGE = (1, 265)` sanity
+bound PR-003 used in the taxi validation checks was correct.
 
-Full acquisition, regular-season/home-game filtering, Baseball-Reference cross-validation
-with discrepancies documented (not silently resolved), and attendance-field
-availability/quality assessment for the optional H5 are all PR-005's scope.
+**Geometry** (263 rows — the two placeholder codes above have no real polygon, consistent
+with 265 lookup rows vs. 263 geometry rows):
+
+| Check | Result |
+|---|---|
+| Required columns (`LocationID`, `geometry`) | OK — all present, plus extra descriptive columns (`OBJECTID`, `Shape_Leng`, `Shape_Area`) not required by this project |
+| Geometry validity | OK — all 263 valid |
+| Empty geometry | OK — none |
+| `LocationID` uniqueness | OK — all 263 unique |
+| CRS | **EPSG:2263** (NAD83 / New York Long Island, US feet) — a projected CRS, not lat/lon. **Note:** the lookup CSV uses `LocationID`/`Borough`/`Zone` (capitalized); the geometry file uses `LocationID`/`borough`/`zone` (lowercase Borough/Zone) — a minor schema inconsistency between the two files to account for when joining them later. |
+
+### LocationID compatibility with taxi trip data — Confirmed (PR-005)
+
+Checked against PR-003's 2019-01 taxi validation slice (`taxi.distinct_location_ids()`), not
+PR-004's full year — sufficient to answer the compatibility question and avoids depending on
+PR-004:
+
+- 263 distinct `LocationID` values appear as a `PULocationID` or `DOLocationID` in the
+  2019-01 slice.
+- **All 263 are present in the zone lookup table** — zero taxi LocationIDs are missing from
+  the lookup.
+- 2 zone-lookup IDs are unused in this slice: `103` (Governor's Island/Ellis Island/Liberty
+  Island, Manhattan — no road access, plausibly zero yellow-cab trips) and `110` (Great Kills
+  Park, Staten Island — a park). Both have an obvious, non-alarming explanation; not treated
+  as a data-quality issue.
+
+### Yankee Stadium zone identification — Confirmed (PR-005)
+
+Identified via point-in-polygon: Yankee Stadium's public coordinates
+(`-73.9262, 40.8296`, WGS84) reprojected to the geometry's CRS (EPSG:2263) and tested against
+every zone polygon (`taxi_zones.find_yankee_stadium_zone()`).
+
+**Result: `LocationID 247`, Zone name "West Concourse", Borough Bronx.** This is a single,
+unambiguous match — the point falls inside exactly one polygon. "West Concourse" is the real
+street/neighborhood immediately surrounding Yankee Stadium (River Avenue / West 161st
+Street), which is consistent with the result being correct, not just technically successful.
+
+This is identification only. The distance/adjacency methodology for the spatial analysis
+itself (H3) remains explicitly not decided here, per `01_ANALYTICAL_PLAN.md`.
+
+## Source 3: NY Yankees 2019 Regular-Season Home Game Schedule
+
+### Acquisition — Confirmed (PR-005)
+
+- **Primary source:** Retrosheet's 2019 regular-season game log,
+  `https://www.retrosheet.org/gamelogs/gl2019.zip`, downloaded via
+  `yankees_schedule.download_gamelog()`. Confirmed regular-season only (2,429 total games
+  across MLB; postseason is a separate archive on Retrosheet).
+- **Field layout confirmed against the real file** (not assumed from documentation): date
+  (field 1), game number / doubleheader indicator (field 2), day of week (field 3), visiting
+  team (field 4), home team (field 7), day/night indicator (field 13), park ID (field 17),
+  attendance (field 18), game duration in minutes (field 19) — 1-indexed, as Retrosheet's own
+  documentation numbers them; `src/event_impact/ingestion/yankees_schedule.py` uses the
+  corresponding 0-indexed positions.
+- Filter: `home_team == "NYA"` (Yankees' Retrosheet code). Since the file is already
+  regular-season-only, no separate game-type filter is needed.
+- Retrieved 2026-08-21. Provenance sidecar recorded.
+
+### Validation results — Confirmed (PR-005)
+
+**81 Yankees regular-season home games found** in 2019, dated 2019-03-28 through 2019-09-22.
+
+| Check | Result |
+|---|---|
+| Single venue | OK — all 81 games at park ID `NYC21` (confirms this is the (new) Yankee Stadium's Retrosheet park code — derived from the data, not assumed) |
+| Date range | OK — all 81 within 2019 |
+| Attendance missing or zero | **2 of 81 (2.47%)** |
+
+**Attendance finding (for the optional H5):** the 2 zero-attendance records are both
+`game_number == 1` on the two 2019 doubleheader dates that involve a Yankees home game
+(2019-05-15 and 2019-07-18) — game 2 of each doubleheader shows the real combined attendance
+(41,138 and 40,504 respectively). This is a known, well-understood Retrosheet convention for
+doubleheaders (attendance is recorded once, under the second game, since it's a single gate
+admission), not a data-integrity problem. **Assessment: attendance data is available and
+reliable enough to be usable for the optional H5**, with the caveat that doubleheader game 1
+needs its attendance either backfilled from game 2 or excluded, depending on how H5 is
+eventually operationalized (not decided here). Non-zero attendance ranges 38,161–48,101
+across the 79 single/second-game records (mean ≈ 41,600 — 2 doubleheader-game-1 zeros
+excluded from this range).
+
+**Discovery relative to PR-002 (confirmed, not newly found — PR-003 already flagged this):**
+no game start-time (clock) field exists in Retrosheet's game logs — only day/night and
+duration.
+
+### Cross-validation — Confirmed (PR-005)
+
+**Baseball-Reference (PR-002's preferred secondary source) returns HTTP 403** to a direct
+request with a realistic browser `User-Agent`
+(`src/event_impact/config.py:DEFAULT_USER_AGENT`) — confirmed again here, matching PR-003's
+planning-stage finding. **Decision:** use **Baseball Almanac** instead — PR-002's explicitly
+named fallback (`https://www.baseball-almanac.com/teamstats/schedule.php?y=2019&t=NYA`),
+which responds normally (HTTP 200).
+
+**Implementation note:** Baseball Almanac's schedule table labels doubleheader games with a
+Roman-numeral suffix (e.g. `"41-I"`, `"42-II"`) instead of a plain integer game number. A
+naive digits-only filter silently drops 14 real games (7 doubleheaders' worth, both teams'
+games) — caught by checking the parsed row count against the expected 162-game season instead
+of trusting an unvalidated filter. Fixed with a regex that matches both plain and
+suffixed game numbers.
+
+**Result: zero discrepancies.** Comparing home-game **dates** (81 Retrosheet games → 76
+unique dates after collapsing doubleheaders to their shared date; Baseball Almanac: same 76
+dates) — every date in one source appears in the other, in both directions. This is a
+date-level cross-check, not a game-by-game one; it doesn't independently re-verify individual
+doubleheader game attendance or scores. Given a clean, unanimous match, the schedule (dates)
+is treated as well-validated; no discrepancies to resolve.
 
 ---
 
@@ -263,15 +356,28 @@ provenance sidecar, is committed to Git.
 
 ```bash
 uv sync
-uv run python -m event_impact.ingestion.taxi
+uv run python -m event_impact.ingestion.taxi   # single-month taxi slice (2019-01)
 ```
 
-This downloads `data/raw/taxi/yellow_tripdata_2019-01.parquet` (if not already present),
-writes its provenance sidecar, and prints the schema/coverage profile and validation report
-shown above. Re-running it after the file already exists skips the download and re-validates
-the file on disk.
+```python
+from event_impact.ingestion import taxi_zones, yankees_schedule
 
-To validate the underlying logic without any network access:
+taxi_zones.download_lookup()
+taxi_zones.download_geometry()
+lookup = taxi_zones.load_lookup()
+gdf = taxi_zones.load_geometry()
+print(taxi_zones.find_yankee_stadium_zone(gdf))
+
+zip_path = yankees_schedule.download_gamelog()
+home_games = yankees_schedule.yankees_home_games(yankees_schedule.parse_gamelog(zip_path))
+print(yankees_schedule.validate_schedule(home_games).summary())
+
+# Best-effort — depends on Baseball Almanac remaining reachable:
+almanac_dates = yankees_schedule.fetch_baseball_almanac_home_dates()
+```
+
+Every download writes a provenance sidecar. To validate the underlying logic without any
+network access:
 
 ```bash
 uv run pytest
@@ -281,31 +387,37 @@ uv run pytest
 
 ## Unresolved issues
 
-- Whether `congestion_surcharge` stays populated (vs. present-but-null) across all 12 months
-  — check during PR-004.
-- Whether the January 2019 timestamp-semantics conclusion (naive local NYC time) holds across
-  DST transitions (March/November 2019) — check during PR-004.
-- Whether the "plausible LocationID range" sanity check (1–265) matches the authoritative
-  zone lookup table — resolve during PR-005.
-- Whether Baseball-Reference will allow automated cross-validation of the Yankees schedule, or
-  whether that has to remain a documented manual/best-effort step — resolve during PR-005.
+- ~~Whether the "plausible LocationID range" sanity check (1–265) matches the authoritative
+  zone lookup table~~ — **resolved by PR-005:** confirmed exact match (1–263 real zones, 264
+  and 265 as documented placeholders).
+- ~~Whether Baseball-Reference will allow automated cross-validation of the Yankees
+  schedule~~ — **resolved by PR-005:** it does not (HTTP 403, confirmed twice); Baseball
+  Almanac is used instead, per PR-002's own named fallback.
 - Whether a Yankees game start-time (clock) is actually needed for the eventual event-window
-  methodology, and if so, which source provides it — not this stage's decision; flagged for
-  whichever later PR defines event windows.
+  methodology, and if so, which source provides it — genuinely still open; not this stage's
+  decision, flagged for whichever later PR defines event windows. Neither Retrosheet nor
+  Baseball Almanac's schedule table provides one.
+- How doubleheader-game-1's zero-attendance records should be handled if H5 is pursued
+  (backfill from game 2, or exclude) — not decided here; flagged for whichever later PR
+  operationalizes H5.
+- **Documentation merge note:** PR-004 and PR-005 both branch from PR-003 and both extend
+  this document independently (PR-004: the taxi section; PR-005: zones, schedule, and this
+  closing section). Whoever merges the second of the two into `main` needs to reconcile the
+  header version/changelog and this section by hand — the content itself doesn't conflict
+  (different sections), only the shared boilerplate around it.
 
 ## Decisions deferred to later PRs
 
-- The full 12-month taxi acquisition and its aggregate validation results — PR-004.
-- Any decision about filtering/cleaning the data-quality issues documented above (invalid
-  distances/fares/passenger counts, corrupted timestamps, dropoff-before-pickup rows) —
-  deferred to whichever later PR builds the analytical dataset. This PR only documents them.
-- Taxi zone lookup/geometry acquisition, Yankee Stadium zone identification, and the
-  zone-to-taxi-data LocationID compatibility check — PR-005.
-- Yankees schedule acquisition, regular-season/home-game filtering, and cross-validation
-  against Baseball-Reference — PR-005.
+- Any decision about filtering/cleaning the taxi data-quality issues documented in the taxi
+  section (invalid distances/fares/passenger counts, corrupted timestamps,
+  dropoff-before-pickup rows) — deferred to whichever later PR builds the analytical dataset.
+- The zone distance/adjacency methodology for the spatial analysis (H3) — Yankee Stadium's
+  zone is now identified (`LocationID 247`), but how other zones relate to it (distance bands
+  vs. adjacency vs. something else) is explicitly data-dependent, per
+  `01_ANALYTICAL_PLAN.md`, and not decided here.
 - The event-time methodology (how pickup/dropoff timestamps get related to game start times,
-  what event window is used) — explicitly out of scope for the acquisition stage entirely,
-  per `01_ANALYTICAL_PLAN.md`.
+  what event window is used, and how the Nov 3 DST fold and the lack of a start-time field
+  are both handled) — explicitly out of scope for the acquisition stage entirely.
 
 ---
 
@@ -315,10 +427,22 @@ uv run pytest
 - [01_ANALYTICAL_PLAN.md](01_ANALYTICAL_PLAN.md)
 - [02_DATA_SOURCES.md](02_DATA_SOURCES.md)
 - [PR-003 — Data Acquisition Foundation](../execution/PR-003_DATA_ACQUISITION_FOUNDATION.md)
+- [PR-005 — Event & Spatial Data Acquisition](../execution/PR-005_EVENT_AND_SPATIAL_DATA_ACQUISITION.md)
 
 ---
 
 ## Changelog
+
+### 1.1.0
+Taxi zones and Yankees schedule sections completed (PR-005): zone lookup (265 rows) and
+geometry (263 rows) acquired and validated; LocationID range confirmed as 1–265; full
+compatibility confirmed between the taxi data's LocationIDs and the zone lookup; Yankee
+Stadium's zone identified as LocationID 247 ("West Concourse", Bronx) via point-in-polygon.
+Yankees 2019 regular-season home schedule acquired from Retrosheet (81 games, single venue);
+cross-validated against Baseball Almanac (used instead of the blocked Baseball-Reference, per
+PR-002's own fallback) with zero date-level discrepancies; attendance assessed as available
+and usable for the optional H5, with a documented doubleheader-game-1 zero-attendance
+convention.
 
 ### 1.0.1
 Addressed PR-003 code-review findings: fixed an hour-truncation bug that undercounted the
