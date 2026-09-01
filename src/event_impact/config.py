@@ -12,7 +12,8 @@ from pathlib import Path
 # Repository root, derived from this file's location so paths work regardless of CWD.
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 
-DATA_DIR = Path(os.environ.get("EVENT_IMPACT_DATA_DIR", PROJECT_ROOT / "data"))
+_data_dir_env = os.environ.get("EVENT_IMPACT_DATA_DIR")
+DATA_DIR = Path(_data_dir_env) if _data_dir_env else PROJECT_ROOT / "data"
 RAW_DIR = DATA_DIR / "raw"
 INTERIM_DIR = DATA_DIR / "interim"
 PROCESSED_DIR = DATA_DIR / "processed"

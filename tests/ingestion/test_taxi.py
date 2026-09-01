@@ -2,6 +2,8 @@ import pandas as pd
 import pytest
 
 from event_impact.ingestion import taxi
+from event_impact.ingestion.common.http import DownloadResult
+from event_impact.ingestion.common.provenance import write_provenance
 
 VALID_ROW = {
     "PULocationID": 100,
@@ -66,6 +68,32 @@ def fixture_month(tmp_path):
             tpep_dropoff_datetime="2019-01-05 13:20:00",
             **{**VALID_ROW, "trip_distance": 0.0},
         ),
+        # 8: out-of-range DOLocationID (distinct from row 4's PULocationID case)
+        dict(
+            tpep_pickup_datetime="2019-01-05 14:00:00",
+            tpep_dropoff_datetime="2019-01-05 14:20:00",
+            **{**VALID_ROW, "DOLocationID": 999},
+        ),
+        # 9: negative total_amount (distinct from row 3's fare_amount case)
+        dict(
+            tpep_pickup_datetime="2019-01-05 15:00:00",
+            tpep_dropoff_datetime="2019-01-05 15:20:00",
+            **{**VALID_ROW, "total_amount": -3.0},
+        ),
+        # 10: null pickup timestamp — must not silently bypass every timestamp-based check
+        dict(
+            tpep_pickup_datetime=None,
+            tpep_dropoff_datetime="2019-01-05 16:20:00",
+            **VALID_ROW,
+        ),
+        # 11: 6h59m59s trip — exercises the hour-vs-second duration comparison. With
+        # date_diff('hour', ...) this reports 6 (hour-boundary crossings, not elapsed
+        # hours) and is wrongly excluded from excessive_trip_duration.
+        dict(
+            tpep_pickup_datetime="2019-01-05 17:00:00",
+            tpep_dropoff_datetime="2019-01-05 23:59:59",
+            **VALID_ROW,
+        ),
     ]
     df = pd.DataFrame(rows)
     df["tpep_pickup_datetime"] = pd.to_datetime(df["tpep_pickup_datetime"])
@@ -82,7 +110,7 @@ def issue(report, check_name):
 def test_inspect_schema_reports_real_columns_and_row_count(fixture_month):
     path, year_month = fixture_month
     profile = taxi.inspect_schema(path, year_month)
-    assert profile.row_count == 8
+    assert profile.row_count == 12
     assert "tpep_pickup_datetime" in profile.columns
     assert "PULocationID" in profile.columns
     assert profile.file_size_bytes > 0
@@ -108,6 +136,25 @@ def test_validate_month_rejects_schema_missing_required_columns(tmp_path):
     assert len(report.issues) == 1
 
 
+def test_run_validation_slice_reports_missing_schema_without_crashing(tmp_path, monkeypatch):
+    """inspect_schema assumes required columns are present and raises a raw KeyError on a
+    bad schema; run_validation_slice must check the schema first and route to the clean
+    required_columns error instead of calling inspect_schema at all."""
+    monkeypatch.setattr(taxi, "TAXI_RAW_DIR", tmp_path)
+    df = pd.DataFrame({"tpep_pickup_datetime": pd.to_datetime(["2019-01-01"])})
+    path = taxi.raw_path_for("2019-01")
+    df.to_parquet(path, engine="pyarrow", index=False)
+    write_provenance(
+        DownloadResult(url="https://example.test", dest_path=path, size_bytes=1, sha256="x")
+    )
+
+    profile, report = taxi.run_validation_slice("2019-01")
+
+    assert profile is None
+    assert report.has_errors()
+    assert issue(report, "required_columns").severity.value == "error"
+
+
 def test_validate_month_detects_dropoff_before_pickup(fixture_month):
     path, year_month = fixture_month
     report = taxi.validate_month(path, year_month)
@@ -123,10 +170,32 @@ def test_validate_month_detects_invalid_fare(fixture_month):
     assert issue(report, "invalid_fare_amount").count == 1
 
 
+def test_validate_month_detects_invalid_total_amount(fixture_month):
+    path, year_month = fixture_month
+    report = taxi.validate_month(path, year_month)
+    assert issue(report, "invalid_total_amount").count == 1
+
+
 def test_validate_month_detects_out_of_range_location_id(fixture_month):
     path, year_month = fixture_month
     report = taxi.validate_month(path, year_month)
     assert issue(report, "null_or_invalid_pu_location_id").count == 1
+    assert issue(report, "null_or_invalid_do_location_id").count == 1
+
+
+def test_validate_month_detects_null_pickup_or_dropoff_datetime(fixture_month):
+    path, year_month = fixture_month
+    report = taxi.validate_month(path, year_month)
+    null_ts_issue = issue(report, "null_pickup_or_dropoff_datetime")
+    assert null_ts_issue.count == 1
+    assert null_ts_issue.severity.value == "error"
+    assert report.has_errors()
+
+
+def test_validate_month_detects_excessive_trip_duration_near_boundary(fixture_month):
+    path, year_month = fixture_month
+    report = taxi.validate_month(path, year_month)
+    assert issue(report, "excessive_trip_duration").count == 1
 
 
 def test_validate_month_detects_pickup_outside_expected_month(fixture_month):

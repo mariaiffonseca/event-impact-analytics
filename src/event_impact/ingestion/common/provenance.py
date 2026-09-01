@@ -42,5 +42,8 @@ def write_provenance(result: DownloadResult) -> Path:
 
 
 def read_provenance(dest_path: Path) -> ProvenanceRecord:
+    """Read back the sidecar written by `write_provenance`. Forward-looking API: no caller
+    yet, but later PRs need this to check an existing sidecar before deciding whether a raw
+    file needs re-downloading (see `taxi.run_validation_slice`'s completeness check)."""
     data = json.loads(provenance_path_for(dest_path).read_text())
     return ProvenanceRecord(**data)

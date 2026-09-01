@@ -3,9 +3,9 @@
 | Field | Value |
 |--------|-------|
 | Name | Event Impact Analytics — Data Acquisition |
-| Version | 1.0.0 |
+| Version | 1.0.1 |
 | Status | Draft (living document — extended by PR-004 and PR-005) |
-| Last Updated | 2026-08-20 |
+| Last Updated | 2026-09-01 |
 
 ---
 
@@ -141,11 +141,19 @@ source-quality validation only; no rows were removed, cleaned, or imputed.
 | Invalid `fare_amount` (null/negative) | 7,129 rows (0.0926%) |
 | Invalid `total_amount` (null/negative) | 7,127 rows (0.0926%) |
 | Invalid `passenger_count` (null/zero) | 146,053 rows (1.8976%) |
+| Null `pickup`/`dropoff_datetime` | OK — none found. **Why this is its own check:** SQL's three-valued logic means a null pickup or dropoff timestamp would otherwise silently pass every check below (a `WHERE`/`CASE WHEN` comparing against `NULL` is `NULL`, not `TRUE`) — flagged as an error-severity issue if it ever occurs. |
 | `dropoff_datetime` before `pickup_datetime` | **4 rows (0.0001%)** — flagged as an error-severity issue |
 | Zero-duration trips (`dropoff == pickup`) | 6,553 rows (0.0851%) |
-| Trip duration over 6 hours | 20,524 rows (0.2667%) |
+| Trip duration over 6 hours | 20,534 rows (0.2668%) |
 | Pickup outside the expected month (2019-01) | 537 rows (0.0070%) — this is the source of the 2001/2088 extremes above |
 | Exact duplicate rows | 0 |
+
+**Correction:** the "trip duration over 6 hours" count was initially reported as 20,524 rows,
+computed via `date_diff('hour', pickup, dropoff) > 6`. That expression counts hour-*boundary*
+crossings, not elapsed hours (e.g. a 6h59m59s trip spanning one calendar-hour boundary reports
+`date_diff = 6`, not `> 6`), which undercounted near-7-hour trips. Fixed to compare elapsed
+seconds instead (`date_diff('second', pickup, dropoff) > 6 * 3600`); 20,534 above is the
+corrected count.
 
 ### Known data-quality issues — Confirmed
 
@@ -311,6 +319,16 @@ uv run pytest
 ---
 
 ## Changelog
+
+### 1.0.1
+Addressed PR-003 code-review findings: fixed an hour-truncation bug that undercounted the
+"trip duration over 6 hours" check (20,524 → 20,534 rows — see the correction note under
+[Validation results](#validation-results--confirmed)); added a dedicated null-timestamp check
+so a null `pickup`/`dropoff_datetime` can no longer silently bypass every other
+timestamp-based check; and several implementation-only fixes (no other numbers in this
+document changed) — parameterized SQL instead of hand-rolled string escaping, atomic
+download-then-rename so a failed download can't leave a corrupt file on disk, and a
+provenance-sidecar check before skipping a re-download.
 
 ### 1.0.0
 Initial version, created under PR-003 (Data Acquisition Foundation). Taxi source fully

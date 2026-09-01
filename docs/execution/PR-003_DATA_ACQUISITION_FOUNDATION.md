@@ -118,7 +118,7 @@ PRs relate and each one's acceptance criteria.
 - [x] `docs/project/03_DATA_ACQUISITION.md` exists with the taxi section complete, other
       sections explicitly deferred.
 - [x] This execution document exists, including acceptance criteria for PR-004 and PR-005.
-- [x] Deterministic, network-free tests exist and pass (`uv run pytest` — 14 passed).
+- [x] Deterministic, network-free tests exist and pass (`uv run pytest` — 25 passed).
 - [x] Lint clean (`uv run ruff check .`).
 - [x] No zone or schedule acquisition code, no full 12-month download, no analytical/EDA code.
 
