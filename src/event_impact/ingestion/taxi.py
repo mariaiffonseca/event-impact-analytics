@@ -292,6 +292,11 @@ def validate_month(path: Path, year_month: str) -> ValidationReport:
         problem_message="exact duplicate rows",
     )
 
+    def count_where(where_clause: str) -> int:
+        return con.execute(
+            f"SELECT count(*) FROM read_parquet(?) WHERE {where_clause}", [str(path)]
+        ).fetchone()[0]
+
     for column in OPTIONAL_DIAGNOSTIC_COLUMNS:
         if column not in columns:
             report.add(
