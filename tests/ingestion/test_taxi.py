@@ -155,6 +155,35 @@ def test_run_validation_slice_reports_missing_schema_without_crashing(tmp_path, 
     assert issue(report, "required_columns").severity.value == "error"
 
 
+def test_run_validation_slice_returns_profile_despite_row_level_errors(tmp_path, monkeypatch):
+    """`dropoff_before_pickup` is an ERROR-severity row-level issue that legitimately fires on
+    real, schema-valid data (see docs/project/03_DATA_ACQUISITION.md) — it must not be mistaken
+    for the schema-missing-columns case that suppresses `inspect_schema`."""
+    monkeypatch.setattr(taxi, "TAXI_RAW_DIR", tmp_path)
+    path = taxi.raw_path_for("2019-01")
+    df = pd.DataFrame(
+        [
+            dict(
+                tpep_pickup_datetime="2019-01-05 09:00:00",
+                tpep_dropoff_datetime="2019-01-05 08:50:00",
+                **VALID_ROW,
+            )
+        ]
+    )
+    df["tpep_pickup_datetime"] = pd.to_datetime(df["tpep_pickup_datetime"])
+    df["tpep_dropoff_datetime"] = pd.to_datetime(df["tpep_dropoff_datetime"])
+    df.to_parquet(path, engine="pyarrow", index=False)
+    write_provenance(
+        DownloadResult(url="https://example.test", dest_path=path, size_bytes=1, sha256="x")
+    )
+
+    profile, report = taxi.run_validation_slice("2019-01")
+
+    assert profile is not None
+    assert report.has_errors()
+    assert issue(report, "dropoff_before_pickup").severity.value == "error"
+
+
 def test_validate_month_detects_dropoff_before_pickup(fixture_month):
     path, year_month = fixture_month
     report = taxi.validate_month(path, year_month)

@@ -53,7 +53,15 @@ def download_file(
             size_bytes = 0
             with requests.get(url, headers=headers, stream=True, timeout=timeout_seconds) as response:
                 response.raise_for_status()
-                expected_size = response.headers.get("Content-Length")
+                # `iter_content()` yields decoded bytes, but when the response carries a
+                # Content-Encoding (e.g. gzip), Content-Length reports the *compressed*
+                # wire size — comparing it against decoded size_bytes would false-positive
+                # on every such response, deterministically failing all retries.
+                expected_size = (
+                    response.headers.get("Content-Length")
+                    if "Content-Encoding" not in response.headers
+                    else None
+                )
                 with open(tmp_path, "wb") as f:
                     for chunk in response.iter_content(chunk_size=CHUNK_SIZE):
                         if not chunk:

@@ -304,14 +304,21 @@ def run_validation_slice(
     if not path.exists() or not provenance_path_for(path).exists():
         download_month(year_month)
 
-    report = ValidationReport(source=f"taxi:{path.name}")
-    columns = pq.ParquetFile(path).schema.names
-    check_required_columns(report, columns, REQUIRED_COLUMNS)
-    if report.has_errors():
+    # `validate_month` performs the same required-columns check as its first step and
+    # returns early (before any row-level checks) on a schema error, so checking its report
+    # for that specific issue gives the same "no raw KeyError on bad schema" behavior without
+    # reading the Parquet metadata and running check_required_columns a second time. This
+    # must check for the `required_columns` issue specifically, not `report.has_errors()` in
+    # general — row-level checks (e.g. `dropoff_before_pickup`) are also ERROR-severity and
+    # legitimately fire on real, schema-valid data (see docs/project/03_DATA_ACQUISITION.md).
+    report = validate_month(path, year_month)
+    schema_missing_columns = any(
+        i.check == "required_columns" and i.severity == Severity.ERROR for i in report.issues
+    )
+    if schema_missing_columns:
         return None, report
 
     profile = inspect_schema(path, year_month)
-    report = validate_month(path, year_month)
     return profile, report
 
 

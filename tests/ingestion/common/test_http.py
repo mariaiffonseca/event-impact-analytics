@@ -105,6 +105,26 @@ def test_download_file_raises_on_content_length_mismatch(tmp_path, monkeypatch):
     assert not _part_path(dest).exists()
 
 
+def test_download_file_skips_length_check_for_encoded_response(tmp_path, monkeypatch):
+    """`iter_content()` yields decoded bytes, but Content-Length on an encoded response
+    describes the compressed wire size — comparing them would false-positive deterministically
+    on every gzip/deflate response, so the check must be skipped when Content-Encoding is set."""
+
+    def fake_get(url, headers, stream, timeout):
+        return FakeResponse(
+            [b"decoded-body-longer-than-compressed"],
+            headers={"Content-Length": "12", "Content-Encoding": "gzip"},
+        )
+
+    monkeypatch.setattr(http.requests, "get", fake_get)
+
+    dest = tmp_path / "out.bin"
+    result = http.download_file("https://example.test/f", dest, max_retries=1)
+
+    assert dest.read_bytes() == b"decoded-body-longer-than-compressed"
+    assert result.size_bytes == len(b"decoded-body-longer-than-compressed")
+
+
 def test_download_file_rejects_non_positive_max_retries(tmp_path):
     with pytest.raises(ValueError):
         http.download_file("https://example.test/f", tmp_path / "out.bin", max_retries=0)
