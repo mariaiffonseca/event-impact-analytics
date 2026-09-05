@@ -59,6 +59,23 @@ def download_month(year_month: str) -> Path:
     return dest
 
 
+def distinct_location_ids(path: Path) -> set[int]:
+    """All distinct PULocationID/DOLocationID values that actually appear in a month's file.
+
+    Used by the taxi-zone compatibility check (PR-005) to confirm every LocationID the taxi
+    data actually uses is a real zone in the lookup table.
+    """
+    con = duckdb.connect()
+    rows = con.execute(
+        """
+        SELECT PULocationID AS id FROM read_parquet(?)
+        UNION SELECT DOLocationID FROM read_parquet(?)
+        """,
+        [str(path), str(path)],
+    ).fetchall()
+    return {int(r[0]) for r in rows if r[0] is not None}
+
+
 @dataclass
 class TaxiSliceProfile:
     year_month: str
