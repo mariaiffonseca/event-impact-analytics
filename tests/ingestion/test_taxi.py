@@ -293,6 +293,76 @@ def test_acquire_and_validate_year_runs_one_slice_per_month(monkeypatch, fixture
     assert all(isinstance(r, taxi.MonthResult) for r in results)
 
 
+def test_acquire_and_validate_year_isolates_month_failures(monkeypatch, fixture_month):
+    """A month that raises (e.g. download_file exhausting retries) must not abort the
+    remaining months or lose results already collected for prior ones."""
+    path, year_month = fixture_month
+
+    def fake_run_validation_slice(requested_year_month: str = "2019-01"):
+        if requested_year_month == "2019-02":
+            # OSError covers both a network failure (requests.RequestException subclasses
+            # it) and a local disk error writing the downloaded file.
+            raise OSError("simulated transient network failure")
+        return taxi.inspect_schema(path, year_month), taxi.validate_month(path, year_month)
+
+    monkeypatch.setattr(taxi, "run_validation_slice", fake_run_validation_slice)
+
+    results = taxi.acquire_and_validate_year(["2019-01", "2019-02", "2019-03"])
+
+    assert [r.year_month for r in results] == ["2019-01", "2019-02", "2019-03"]
+    assert results[0].profile is not None
+    assert results[2].profile is not None
+    failed = results[1]
+    assert failed.profile is None
+    failure_issue = issue(failed.report, "acquisition_failed")
+    assert failure_issue.severity.value == "error"
+    assert "2019-02" in failure_issue.message
+
+
+def test_acquire_and_validate_year_default_covers_all_twelve_months(monkeypatch, fixture_month):
+    """The default parameter must not be a single shared mutable list mistakenly reused
+    (or mutated) across calls — each no-argument call should independently cover the full
+    year."""
+    path, year_month = fixture_month
+    calls: list[str] = []
+
+    def fake_run_validation_slice(requested_year_month: str = "2019-01"):
+        calls.append(requested_year_month)
+        return taxi.inspect_schema(path, year_month), taxi.validate_month(path, year_month)
+
+    monkeypatch.setattr(taxi, "run_validation_slice", fake_run_validation_slice)
+
+    results = taxi.acquire_and_validate_year()
+
+    assert calls == taxi.YEAR_MONTHS_2019
+    assert len(results) == 12
+
+
+def test_aggregate_issue_counts_counts_schema_failure_as_one_not_zero():
+    """An ERROR-severity issue with no explicit count (a month that failed schema validation
+    or acquisition entirely) must not be indistinguishable from a check that ran and found
+    nothing — it should contribute 1 per affected month."""
+
+    def make_failed_report(check_name: str) -> taxi.ValidationReport:
+        report = taxi.ValidationReport(source="test")
+        report.add(check_name, taxi.Severity.ERROR, "simulated total failure")
+        return report
+
+    results = [
+        taxi.MonthResult(
+            year_month="2019-01", profile=None, report=make_failed_report("required_columns")
+        ),
+        taxi.MonthResult(
+            year_month="2019-02", profile=None, report=make_failed_report("acquisition_failed")
+        ),
+    ]
+
+    totals = taxi.aggregate_issue_counts(results)
+
+    assert totals["required_columns"] == 1
+    assert totals["acquisition_failed"] == 1
+
+
 def test_aggregate_issue_counts_sums_across_months():
     def make_report(dropoff_before_pickup_count: int) -> taxi.ValidationReport:
         report = taxi.ValidationReport(source="test")

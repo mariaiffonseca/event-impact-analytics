@@ -1,9 +1,10 @@
 """NYC TLC Yellow Taxi trip data — acquisition and source validation.
 
 PR-003 acquired and validated a single-month slice (2019-01) to establish the real schema,
-coverage, and data-quality profile. PR-004 reuses `download_month()` / `inspect_schema()` /
-`validate_month()` unchanged, once per month, to acquire and validate the full 2019 calendar
-year (`acquire_and_validate_year()` / `aggregate_issue_counts()` below).
+coverage, and data-quality profile. PR-004 reuses `download_month()` / `inspect_schema()`
+unchanged, extends `validate_month()` with an optional-column diagnostic (see
+`OPTIONAL_DIAGNOSTIC_COLUMNS`), and applies both once per month to acquire and validate the
+full 2019 calendar year (`acquire_and_validate_year()` / `aggregate_issue_counts()` below).
 
 All inspection is done via PyArrow Parquet metadata and DuckDB querying the Parquet file
 directly — the file is never loaded into memory as a whole (no `pandas.read_parquet()`), and
@@ -154,11 +155,12 @@ def validate_month(path: Path, year_month: str) -> ValidationReport:
 
     # (check_name, SQL condition, params for that condition, ok_message, problem_message,
     # severity). Conditions and their params are combined into a single query below via
-    # `sum(CASE WHEN ... THEN 1 ELSE 0 END)` so the 7.7M-row file is scanned once for all of
-    # these checks (plus one more scan for `duplicate_rows`, which needs whole-row DISTINCT)
-    # instead of once per check. `read_parquet(?)` and the `?` placeholders below are bound
-    # positionally by DuckDB in the order they appear in the query text — see the query
-    # assembly loop, which relies on that ordering.
+    # `sum(CASE WHEN ... THEN 1 ELSE 0 END)` — along with a null-count term per present
+    # optional diagnostic column (see `present_optional_columns` below) — so the 7.7M-row
+    # file is scanned once for all of these checks (plus one more scan for `duplicate_rows`,
+    # which needs whole-row DISTINCT) instead of once per check. `read_parquet(?)` and the
+    # `?` placeholders below are bound positionally by DuckDB in the order they appear in the
+    # query text — see the query assembly loop, which relies on that ordering.
     checks: list[tuple[str, str, list[object], str, str, Severity]] = [
         (
             "null_or_invalid_pu_location_id",
@@ -258,16 +260,21 @@ def validate_month(path: Path, year_month: str) -> ValidationReport:
         ),
     ]
 
+    present_optional_columns = [c for c in OPTIONAL_DIAGNOSTIC_COLUMNS if c in columns]
+
     select_parts = ["count(*) AS total"]
     params: list[object] = []
     for name, condition, condition_params, *_ in checks:
         select_parts.append(f"sum(CASE WHEN {condition} THEN 1 ELSE 0 END) AS {name}")
         params.extend(condition_params)
+    for column in present_optional_columns:
+        select_parts.append(f"sum(CASE WHEN {column} IS NULL THEN 1 ELSE 0 END) AS {column}")
     params.append(str(path))
 
     row = con.execute(f"SELECT {', '.join(select_parts)} FROM read_parquet(?)", params).fetchone()
     total = row[0]
-    counts = dict(zip((c[0] for c in checks), row[1:], strict=True))
+    counts = dict(zip((c[0] for c in checks), row[1 : 1 + len(checks)], strict=True))
+    optional_null_counts = dict(zip(present_optional_columns, row[1 + len(checks) :], strict=True))
 
     for name, _condition, _condition_params, ok_message, problem_message, severity in checks:
         check_count(
@@ -292,11 +299,6 @@ def validate_month(path: Path, year_month: str) -> ValidationReport:
         problem_message="exact duplicate rows",
     )
 
-    def count_where(where_clause: str) -> int:
-        return con.execute(
-            f"SELECT count(*) FROM read_parquet(?) WHERE {where_clause}", [str(path)]
-        ).fetchone()[0]
-
     for column in OPTIONAL_DIAGNOSTIC_COLUMNS:
         if column not in columns:
             report.add(
@@ -308,7 +310,7 @@ def validate_month(path: Path, year_month: str) -> ValidationReport:
         check_count(
             report,
             f"optional_column_null:{column}",
-            count_where(f"{column} IS NULL"),
+            optional_null_counts[column],
             total=total,
             ok_message=f"{column} present with no nulls",
             problem_message=f"{column} present but null for some rows",
@@ -359,27 +361,58 @@ class MonthResult:
     report: ValidationReport
 
 
-def acquire_and_validate_year(year_months: list[str] = YEAR_MONTHS_2019) -> list[MonthResult]:
+def acquire_and_validate_year(year_months: list[str] | None = None) -> list[MonthResult]:
     """Download (if needed) and validate every month in `year_months`, independently.
 
     No month's failure stops the others — if a month can't be downloaded or its schema is
     invalid, that's itself a finding to document (see `03_DATA_ACQUISITION.md`), not a reason
-    to silently drop the month from the results.
+    to silently drop the month from the results. This also covers failures `run_validation_slice`
+    doesn't itself turn into a clean result — e.g. `download_file` exhausting its retries on a
+    transient network failure or a TLC outage (`requests.RequestException`, a subclass of
+    `OSError`), a disk error writing the file (`OSError`), or a corrupt/truncated downloaded
+    file that fails to parse (`pyarrow`'s `ArrowException` or a `duckdb.Error` from querying
+    it) — by catching those and recording the failure as an ERROR-severity issue for that
+    month instead of aborting the whole run. A logic error (e.g. `TypeError`, `KeyError`) is
+    deliberately not caught here — it should fail loudly rather than being reported as a
+    per-month data problem.
     """
+    if year_months is None:
+        year_months = YEAR_MONTHS_2019
     results = []
     for year_month in year_months:
-        profile, report = run_validation_slice(year_month)
+        try:
+            profile, report = run_validation_slice(year_month)
+        except (OSError, duckdb.Error, pa.lib.ArrowException) as exc:
+            profile = None
+            report = ValidationReport(source=f"taxi:{year_month}")
+            report.add(
+                "acquisition_failed",
+                Severity.ERROR,
+                f"failed to download or validate {year_month}: {exc}",
+            )
         results.append(MonthResult(year_month=year_month, profile=profile, report=report))
     return results
 
 
 def aggregate_issue_counts(results: list[MonthResult]) -> dict[str, int]:
-    """Sum each check's row count across all months (checks with no count, i.e. no problem
-    found that month, contribute 0)."""
+    """Sum each check's row count across all months.
+
+    A check with no explicit count contributes 0 only when it's INFO/WARNING severity, i.e. it
+    ran and found no problem. An ERROR-severity issue with no count — `required_columns` on a
+    schema failure, or `acquisition_failed` — means the check never ran at all for that month,
+    which must not be indistinguishable from "ran cleanly"; it contributes 1 per affected month
+    instead, so the aggregate always shows *something* nonzero for it.
+    """
     totals: dict[str, int] = {}
     for result in results:
         for issue in result.report.issues:
-            totals[issue.check] = totals.get(issue.check, 0) + (issue.count or 0)
+            if issue.count is not None:
+                contribution = issue.count
+            elif issue.severity == Severity.ERROR:
+                contribution = 1
+            else:
+                contribution = 0
+            totals[issue.check] = totals.get(issue.check, 0) + contribution
     return totals
 
 
@@ -403,7 +436,11 @@ if __name__ == "__main__":
             print()
         total_rows = sum(r.profile.row_count for r in year_results if r.profile is not None)
         total_bytes = sum(r.profile.file_size_bytes for r in year_results if r.profile is not None)
-        print(f"TOTAL: {total_rows:,} rows across {len(year_results)} months, {total_bytes:,} bytes")
+        succeeded = sum(1 for r in year_results if r.profile is not None)
+        print(
+            f"TOTAL: {total_rows:,} rows across {succeeded} of {len(year_results)} months "
+            f"({total_bytes:,} bytes)"
+        )
         print(f"Aggregate issue counts: {aggregate_issue_counts(year_results)}")
     else:
         slice_profile, slice_report = run_validation_slice()

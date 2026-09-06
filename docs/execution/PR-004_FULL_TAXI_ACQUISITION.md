@@ -94,7 +94,7 @@ Highlights:
 - [x] The two timestamp-semantics open questions from PR-003 (DST-transition behavior,
       `congestion_surcharge` population across months) are checked and documented.
 - [x] Deterministic, network-free tests exist for the new orchestration/aggregation logic
-      (`uv run pytest` — 18 passed).
+      (`uv run pytest` — 31 passed: 27 from `main`'s post-#3 suite, 4 new to this branch).
 - [x] Lint clean (`uv run ruff check .`).
 - [x] No analytical dataset, aggregates, event enrichment, EDA, or event-window code
       introduced.
