@@ -1,3 +1,9 @@
+import csv
+import zipfile
+
+import pytest
+import requests
+
 from event_impact.ingestion import yankees_schedule as ys
 
 
@@ -45,6 +51,18 @@ def test_parse_row_extracts_expected_fields():
 def test_parse_row_handles_blank_attendance_as_none():
     game = ys._parse_row(make_row(attendance=""))
     assert game.attendance is None
+
+
+def test_parse_row_rejects_short_malformed_date():
+    # A short date like "2019" must not silently slice into "2019--" (a corrupted date that
+    # would still pass the date_outside_2019 startswith("2019-") check).
+    with pytest.raises(ValueError, match="YYYYMMDD"):
+        ys._parse_row(make_row(date="2019"))
+
+
+def test_parse_row_rejects_non_numeric_date():
+    with pytest.raises(ValueError, match="YYYYMMDD"):
+        ys._parse_row(make_row(date="2019AB28"))
 
 
 def test_yankees_home_games_filters_by_home_team():
@@ -118,7 +136,77 @@ def test_cross_validate_home_dates_reports_discrepancies_both_directions():
     only_primary = issue(report, "dates_only_in_primary_source")
     assert only_primary.count == 1
     assert "2019-03-30" in only_primary.message
+    assert only_primary.severity.value == "warning"
 
     only_secondary = issue(report, "dates_only_in_secondary_source")
     assert only_secondary.count == 1
     assert "2019-04-01" in only_secondary.message
+    assert only_secondary.severity.value == "warning"
+
+
+def test_cross_validate_home_dates_escalates_to_error_when_secondary_source_unavailable():
+    report = ys.cross_validate_home_dates({"2019-03-28"}, None)
+    assert report.has_errors()
+    assert issue(report, "secondary_source_unavailable").severity.value == "error"
+
+
+def test_cross_validate_home_dates_escalates_to_error_on_majority_mismatch():
+    # A secondary source missing most of the primary's dates looks like a broken fetch/parse,
+    # not a handful of genuine discrepancies, so this must fail has_errors() rather than pile
+    # up as WARNING-level noise.
+    primary = {f"2019-04-{d:02d}" for d in range(1, 11)}  # 10 dates
+    secondary = {"2019-04-01"}  # only 1 of 10 matches -> 9/10 missing
+    report = ys.cross_validate_home_dates(primary, secondary)
+    assert report.has_errors()
+    assert issue(report, "dates_only_in_primary_source").severity.value == "error"
+
+
+def test_fetch_baseball_almanac_home_dates_returns_none_on_request_failure(monkeypatch):
+    def fake_get(*args, **kwargs):
+        raise requests.ConnectionError("simulated network failure")
+
+    monkeypatch.setattr(ys.requests, "get", fake_get)
+    assert ys.fetch_baseball_almanac_home_dates() is None
+
+
+def test_fetch_baseball_almanac_home_dates_returns_none_on_implausible_page_structure(
+    monkeypatch,
+):
+    """A page whose structure no longer matches the hardcoded table/column/row assumptions
+    should degrade to None (best-effort) rather than crash or silently return a wrong/empty
+    result — simulated here via an HTML table shaped nothing like the real schedule page."""
+
+    class FakeResponse:
+        text = "<table><tr><td>unexpected content</td></tr></table>"
+
+        def raise_for_status(self):
+            pass
+
+    monkeypatch.setattr(ys.requests, "get", lambda *a, **k: FakeResponse())
+    assert ys.fetch_baseball_almanac_home_dates() is None
+
+
+def test_run_schedule_acquisition_wires_the_full_pipeline(tmp_path, monkeypatch):
+    """Regression test for this module having no committed caller chaining download -> parse
+    -> filter -> validate -> cross-validate together — exercises the same chain the PR's
+    headline numbers are claimed to come from."""
+    text_path = tmp_path / "gl2019.txt"
+    with open(text_path, "w", newline="") as f:
+        writer = csv.writer(f)
+        writer.writerow(make_row(date="20190328", home="NYA", visiting="BAL"))
+        writer.writerow(make_row(date="20190329", home="BOS", visiting="NYA"))  # not a home game
+    zip_path = tmp_path / "gl2019.zip"
+    with zipfile.ZipFile(zip_path, "w") as zf:
+        zf.write(text_path, arcname="gl2019.txt")
+
+    monkeypatch.setattr(ys, "download_gamelog", lambda year="2019": zip_path)
+    monkeypatch.setattr(
+        ys, "fetch_baseball_almanac_home_dates", lambda year="2019": {"2019-03-28"}
+    )
+
+    home_games, schedule_report, cross_validation_report = ys.run_schedule_acquisition()
+
+    assert len(home_games) == 1
+    assert home_games[0].date == "2019-03-28"
+    assert not schedule_report.has_errors()
+    assert not cross_validation_report.has_errors()

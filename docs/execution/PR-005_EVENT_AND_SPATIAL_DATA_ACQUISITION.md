@@ -3,9 +3,9 @@
 | Field | Value |
 |--------|-------|
 | Name | PR-005 — Event & Spatial Data Acquisition |
-| Version | 1.0.0 |
+| Version | 1.1.0 |
 | Status | Complete |
-| Last Updated | 2026-08-21 |
+| Last Updated | 2026-09-06 |
 
 ---
 
@@ -26,17 +26,21 @@ not acquire them. Its
 [Stage Breakdown](PR-003_DATA_ACQUISITION_FOUNDATION.md#stage-breakdown-across-pr-003-pr-004-pr-005)
 section defined this PR's acceptance criteria in advance.
 
-This PR branches from `feature/pr-003-data-acquisition-foundation` (not `main`, not PR-004 —
-PR-005 only depends on PR-003's scaffolding and shared utilities, not on PR-004's full-year
-taxi acquisition, per PR-003's own dependency note). It reuses PR-003's 2019-01 taxi
-validation slice for the LocationID compatibility check rather than waiting on PR-004.
+This PR originally branched from `feature/pr-003-data-acquisition-foundation` (not `main`,
+not PR-004 — PR-005 only depends on PR-003's scaffolding and shared utilities, not on
+PR-004's full-year taxi acquisition, per PR-003's own dependency note) and has since been
+rebased onto `main` now that PR-003 is merged; it remains independent of PR-004, which is
+still unmerged. It reuses PR-003's 2019-01 taxi validation slice for the LocationID
+compatibility check rather than waiting on PR-004.
 
-**Note on `docs/project/03_DATA_ACQUISITION.md`:** since PR-004 and PR-005 both branch from
+**Note on `docs/project/03_DATA_ACQUISITION.md`:** since PR-004 and PR-005 both branched from
 PR-003 and both extend that document independently (PR-004 the taxi section, PR-005 the zones
-and schedule sections plus the document's closing sections), the two branches' edits to that
-file will need a small manual reconciliation (header version number, changelog ordering) at
-whichever PR merges second — the actual content doesn't conflict, since the two PRs edit
-different sections.
+and schedule sections plus the document's closing sections), the header-version/changelog
+conflict this created has now been reconciled in this branch as part of rebasing onto `main`:
+`1.2.0` (this PR, after addressing review findings) stacks above `1.0.1` (PR-003's
+post-merge review fixes) — the actual section content never conflicted, since the two PRs
+edit different sections. PR-004 is still unmerged and branches from pre-fix PR-003, so it
+will need the same reconciliation (docs only, not code) when it's rebased or merged.
 
 ## Objective
 
@@ -121,7 +125,7 @@ Highlights:
       documented rather than silently resolved (none found).
 - [x] Attendance-field availability and quality assessed and documented as optional (for H5).
 - [x] `docs/project/03_DATA_ACQUISITION.md`'s zones and schedule sections completed.
-- [x] Deterministic, network-free tests exist and pass (`uv run pytest` — 37 passed).
+- [x] Deterministic, network-free tests exist and pass (`uv run pytest` — 76 passed).
 - [x] Lint clean (`uv run ruff check .`).
 
 ## Suggested Commits
@@ -141,6 +145,22 @@ Highlights:
 - [PR-004 — Full 2019 Taxi Dataset Acquisition](PR-004_FULL_TAXI_ACQUISITION.md)
 
 ## Changelog
+
+### 1.1.0
+Rebased onto `main` and addressed code-review findings on the taxi-zones and Yankees-schedule
+modules — no acquisition numbers changed, all implementation-only fixes (see
+[docs/project/03_DATA_ACQUISITION.md's 1.2.0 changelog entry](../project/03_DATA_ACQUISITION.md#changelog)
+for the full list): a null `LocationID` no longer mislabels as a duplicate; zone-geometry
+provenance is recorded only after extraction succeeds; the extracted shapefile is discovered
+by search instead of a hardcoded path; `find_yankee_stadium_zone` now requires exactly one
+matching zone; `check_location_id_compatibility`'s result now has severity encoding via a new
+`validate_location_id_compatibility`; the Baseball Almanac cross-check degrades gracefully
+instead of crashing on a network/parse failure, and a cross-validation failure severe enough
+to indicate a broken secondary source is now ERROR-severity; a malformed schedule date is now
+rejected instead of silently corrupted; and each module gained a `run_*_acquisition()`
+orchestration function (plus `__main__` entry point) as the single reproducible path to this
+document's numbers, reusing a new shared `download_and_record()` helper. Test count grew from
+37 to 76 covering the above.
 
 ### 1.0.0
 Initial version. Taxi zone lookup and geometry acquired and validated; Yankee Stadium zone

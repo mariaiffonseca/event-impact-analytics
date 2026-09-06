@@ -12,7 +12,7 @@ from dataclasses import asdict, dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 
-from event_impact.ingestion.common.http import DownloadResult
+from event_impact.ingestion.common.http import DownloadResult, download_file
 
 
 @dataclass(frozen=True)
@@ -47,3 +47,29 @@ def read_provenance(dest_path: Path) -> ProvenanceRecord:
     file needs re-downloading (see `taxi.run_validation_slice`'s completeness check)."""
     data = json.loads(provenance_path_for(dest_path).read_text())
     return ProvenanceRecord(**data)
+
+
+def is_already_acquired(dest_path: Path) -> bool:
+    """True if `dest_path` and its provenance sidecar both already exist.
+
+    A download interrupted after writing the raw file but before its provenance sidecar
+    (process killed, disk full) must not be mistaken for complete — this is that guard,
+    shared by every ingestion source instead of each reimplementing it.
+    """
+    return dest_path.exists() and provenance_path_for(dest_path).exists()
+
+
+def download_and_record(url: str, dest_path: Path) -> Path:
+    """Download `url` to `dest_path` and write its provenance sidecar, skipping the download
+    entirely when `dest_path` was already fully acquired (see `is_already_acquired`).
+
+    This is the download-then-record sequence every ingestion source needs; sources whose
+    acquisition has an extra step between download and "fully acquired" (e.g. extracting an
+    archive) should not use this directly — provenance must only be written once that step
+    also succeeds, so they call `download_file`/`write_provenance` themselves instead.
+    """
+    if is_already_acquired(dest_path):
+        return dest_path
+    result = download_file(url, dest_path)
+    write_provenance(result)
+    return dest_path

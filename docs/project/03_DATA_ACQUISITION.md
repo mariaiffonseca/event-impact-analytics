@@ -3,9 +3,9 @@
 | Field | Value |
 |--------|-------|
 | Name | Event Impact Analytics — Data Acquisition |
-| Version | 1.2.0 |
-| Status | Draft — finalized by this PR for the sources in its scope (taxi zones, Yankees schedule); the taxi section is separately extended by PR-004, which branches from PR-003 in parallel with this PR — see the note under [Changelog](#changelog) about reconciling the two at merge time |
-| Last Updated | 2026-09-02 |
+| Version | 1.3.0 |
+| Status | Draft — finalized by this PR for the sources in its scope (taxi zones, Yankees schedule); the taxi section was extended separately by PR-004, which has since merged into `main` — this branch has been rebased onto that merge, and the version/changelog reconciliation between the two is already reflected below (1.3.0 stacks above PR-004's 1.1.0) |
+| Last Updated | 2026-09-10 |
 
 ---
 
@@ -428,31 +428,44 @@ provenance sidecar, is committed to Git.
 
 ## Reproducibility instructions
 
+Each module has a `__main__` entry point that runs its full acquisition-through-validation
+chain and prints the resulting reports — the single reproducible path to the numbers in this
+document, rather than calling individual functions out of order:
+
 ```bash
 uv sync
 uv run python -m event_impact.ingestion.taxi              # single-month slice (2019-01)
 uv run python -m event_impact.ingestion.taxi --full-year   # all 12 months of 2019
+uv run python -m event_impact.ingestion.taxi_zones         # zone lookup/geometry, LocationID
+                                                            # compatibility, Yankee Stadium zone
+uv run python -m event_impact.ingestion.yankees_schedule   # schedule + cross-validation
 ```
 
 Both taxi commands download only what's missing (if a file already exists on disk, it's
 re-validated rather than re-downloaded) and write a provenance sidecar per file. The
 full-year run downloads ~1.24 GB in total.
 
+Or programmatically, via the same orchestration functions those entry points call:
+
 ```python
 from event_impact.ingestion import taxi_zones, yankees_schedule
 
-taxi_zones.download_lookup()
-taxi_zones.download_geometry()
-lookup = taxi_zones.load_lookup()
-gdf = taxi_zones.load_geometry()
-print(taxi_zones.find_yankee_stadium_zone(gdf))
+lookup_report, geometry_report, compatibility_report, yankee_zone = (
+    taxi_zones.run_zone_acquisition()
+)
+print(lookup_report.summary())
+print(geometry_report.summary())
+print(compatibility_report.summary())
+print(yankee_zone[["LocationID"]])
 
-zip_path = yankees_schedule.download_gamelog()
-home_games = yankees_schedule.yankees_home_games(yankees_schedule.parse_gamelog(zip_path))
-print(yankees_schedule.validate_schedule(home_games).summary())
-
-# Best-effort — depends on Baseball Almanac remaining reachable:
-almanac_dates = yankees_schedule.fetch_baseball_almanac_home_dates()
+# Best-effort cross-validation: degrades to a `secondary_source_unavailable` ERROR issue in
+# the returned report (rather than raising) if Baseball Almanac isn't reachable or its page
+# structure has changed.
+home_games, schedule_report, cross_validation_report = (
+    yankees_schedule.run_schedule_acquisition()
+)
+print(schedule_report.summary())
+print(cross_validation_report.summary())
 ```
 
 Every download writes a provenance sidecar. To validate the underlying logic without any
@@ -484,11 +497,12 @@ uv run pytest
 - How doubleheader-game-1's zero-attendance records should be handled if H5 is pursued
   (backfill from game 2, or exclude) — not decided here; flagged for whichever later PR
   operationalizes H5.
-- **Documentation merge note:** PR-004 and PR-005 both branch from PR-003 and both extend
-  this document independently (PR-004: the taxi section; PR-005: zones, schedule, and this
-  closing section). Whoever merges the second of the two into `main` needs to reconcile the
-  header version/changelog and this section by hand — the content itself doesn't conflict
-  (different sections), only the shared boilerplate around it.
+- ~~**Documentation merge note:** PR-004 and PR-005 both branch from PR-003 and both extend
+  this document independently, requiring header version/changelog reconciliation by whoever
+  merges the second of the two into `main`~~ — **resolved:** PR-004 merged first; this branch
+  has since been rebased onto that merge, with the header version bumped to stack above
+  PR-004's 1.1.0 and the changelog reordered accordingly (see [Changelog](#changelog)). The
+  content itself never conflicted (different sections) — only this shared boilerplate did.
 
 ## Decisions deferred to later PRs
 
@@ -518,6 +532,27 @@ uv run pytest
 ---
 
 ## Changelog
+
+### 1.3.0
+Addressed PR-005 code-review findings — no numbers in this document changed, all
+implementation-only fixes: a null `LocationID` in the zone lookup/geometry no longer
+mislabels as a duplicate; zone-geometry provenance is now recorded only once extraction
+succeeds (not against the raw zip alone); the extracted shapefile path is now discovered by
+search instead of assuming a hardcoded internal zip folder name; `find_yankee_stadium_zone`
+now raises if it doesn't find exactly one matching zone instead of silently returning zero or
+several; `check_location_id_compatibility`'s result is now wrapped in a `ValidationReport`
+(via the new `validate_location_id_compatibility`) so a real incompatibility fails
+`has_errors()`; the Baseball Almanac cross-check now degrades gracefully (returns `None`) on
+a network/parse failure or an implausible parsed game count instead of crashing, and a
+cross-validation failure severe enough to indicate a broken secondary source is now
+ERROR-severity instead of piling up as WARNINGs; a malformed Retrosheet date field is now
+rejected instead of silently producing a corrupted date that still passes validation; and
+`taxi_zones.run_zone_acquisition()` / `yankees_schedule.run_schedule_acquisition()` were
+added as the single reproducible entry points chaining each source's full
+download-through-cross-validation pipeline (see
+[Reproducibility instructions](#reproducibility-instructions)), reusing a new shared
+`download_and_record()` helper (`ingestion/common/provenance.py`) that also removes the
+download+provenance duplication across `taxi.py`/`taxi_zones.py`/`yankees_schedule.py`.
 
 ### 1.2.0
 Taxi zones and Yankees schedule sections completed (PR-005): zone lookup (265 rows) and

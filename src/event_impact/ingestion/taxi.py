@@ -23,8 +23,7 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 
 from event_impact.config import TAXI_RAW_DIR, taxi_trip_data_url
-from event_impact.ingestion.common.http import download_file
-from event_impact.ingestion.common.provenance import provenance_path_for, write_provenance
+from event_impact.ingestion.common.provenance import download_and_record
 from event_impact.ingestion.common.validation import (
     Severity,
     ValidationReport,
@@ -86,11 +85,9 @@ def _require_pickup_timestamp_type(path: Path, year_month: str) -> None:
 
 
 def download_month(year_month: str) -> Path:
-    """Download one month of trip data (e.g. '2019-01') to data/raw/taxi/, with provenance."""
-    dest = raw_path_for(year_month)
-    result = download_file(taxi_trip_data_url(year_month), dest)
-    write_provenance(result)
-    return dest
+    """Download one month of trip data (e.g. '2019-01') to data/raw/taxi/, with provenance.
+    Skips the download if the file was already fully acquired (see `is_already_acquired`)."""
+    return download_and_record(taxi_trip_data_url(year_month), raw_path_for(year_month))
 
 
 def distinct_location_ids(path: Path) -> set[int]:
@@ -383,10 +380,7 @@ def run_validation_slice(
     KeyError instead of this clean error path).
     """
     path = raw_path_for(year_month)
-    # A download that was interrupted after writing the raw file but before its provenance
-    # sidecar (e.g. process killed, disk full) must not be mistaken for complete.
-    if not path.exists() or not provenance_path_for(path).exists():
-        download_month(year_month)
+    download_month(year_month)
 
     # `validate_month` performs the same required-columns check as its first step and
     # returns early (before any row-level checks) on a schema error, so checking its report
