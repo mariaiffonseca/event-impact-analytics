@@ -30,8 +30,9 @@ PR-003 (not `main`, since PR-003 is not yet merged) and depends only on its scaf
 ## Objective
 
 1. Add a thin orchestration layer over PR-003's per-month functions
-   (`acquire_and_validate_year()`, `aggregate_issue_counts()`) — no change to the underlying
-   download/inspect/validate logic.
+   (`acquire_and_validate_year()`, `aggregate_issue_counts()`), reusing `download_month()` /
+   `inspect_schema()` unchanged; `validate_month()` gains a new optional-column diagnostic
+   (see `OPTIONAL_DIAGNOSTIC_COLUMNS`) but its existing checks are otherwise untouched.
 2. Actually download and validate all 12 months of 2019 taxi trip data.
 3. Document per-month and aggregate results in `docs/project/03_DATA_ACQUISITION.md`.
 4. Resolve PR-003's two open questions with real evidence from the full year of data.
@@ -94,7 +95,7 @@ Highlights:
 - [x] The two timestamp-semantics open questions from PR-003 (DST-transition behavior,
       `congestion_surcharge` population across months) are checked and documented.
 - [x] Deterministic, network-free tests exist for the new orchestration/aggregation logic
-      (`uv run pytest` — 31 passed: 27 from `main`'s post-#3 suite, 4 new to this branch).
+      (`uv run pytest` — 36 passed: 27 from `main`'s post-#3 suite, 9 new to this branch).
 - [x] Lint clean (`uv run ruff check .`).
 - [x] No analytical dataset, aggregates, event enrichment, EDA, or event-window code
       introduced.

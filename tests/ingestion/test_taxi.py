@@ -276,13 +276,36 @@ def test_validate_month_reports_optional_column_nulls_when_present(tmp_path):
     assert null_issue.severity.value == "info"
 
 
+def test_validate_month_handles_zero_row_file_with_optional_column(tmp_path):
+    """DuckDB's sum(CASE WHEN ... THEN 1 ELSE 0 END) over a zero-row file returns SQL NULL,
+    not 0 — must not crash check_count's `if count > 0` with a TypeError."""
+    df = pd.DataFrame(columns=[*VALID_ROW.keys(), "tpep_pickup_datetime", "tpep_dropoff_datetime",
+                                "congestion_surcharge"])
+    df["tpep_pickup_datetime"] = pd.to_datetime(df["tpep_pickup_datetime"])
+    df["tpep_dropoff_datetime"] = pd.to_datetime(df["tpep_dropoff_datetime"])
+    path = tmp_path / "yellow_tripdata_2019-01.parquet"
+    df.to_parquet(path, engine="pyarrow", index=False)
+
+    report = taxi.validate_month(path, "2019-01")
+
+    # The null count over zero rows is SQL NULL under the hood; check_count must treat that
+    # as "no problem found" (count stays unset, ok_message used) rather than crashing on
+    # `None > 0`.
+    null_issue = issue(report, "optional_column_null:congestion_surcharge")
+    assert null_issue.count is None
+    assert null_issue.severity.value == "info"
+
+
 def test_acquire_and_validate_year_runs_one_slice_per_month(monkeypatch, fixture_month):
     path, year_month = fixture_month
     calls: list[str] = []
+    slices: dict[str, tuple[taxi.TaxiSliceProfile, taxi.ValidationReport]] = {}
 
     def fake_run_validation_slice(requested_year_month: str = "2019-01"):
         calls.append(requested_year_month)
-        return taxi.inspect_schema(path, year_month), taxi.validate_month(path, year_month)
+        result = (taxi.inspect_schema(path, year_month), taxi.validate_month(path, year_month))
+        slices[requested_year_month] = result
+        return result
 
     monkeypatch.setattr(taxi, "run_validation_slice", fake_run_validation_slice)
 
@@ -291,6 +314,10 @@ def test_acquire_and_validate_year_runs_one_slice_per_month(monkeypatch, fixture
     assert calls == ["2019-01", "2019-02"]
     assert [r.year_month for r in results] == ["2019-01", "2019-02"]
     assert all(isinstance(r, taxi.MonthResult) for r in results)
+    for r in results:
+        expected_profile, expected_report = slices[r.year_month]
+        assert r.profile is expected_profile
+        assert r.report is expected_report
 
 
 def test_acquire_and_validate_year_isolates_month_failures(monkeypatch, fixture_month):
@@ -298,11 +325,50 @@ def test_acquire_and_validate_year_isolates_month_failures(monkeypatch, fixture_
     remaining months or lose results already collected for prior ones."""
     path, year_month = fixture_month
 
+    slices: dict[str, tuple[taxi.TaxiSliceProfile, taxi.ValidationReport]] = {}
+
     def fake_run_validation_slice(requested_year_month: str = "2019-01"):
         if requested_year_month == "2019-02":
             # OSError covers both a network failure (requests.RequestException subclasses
             # it) and a local disk error writing the downloaded file.
             raise OSError("simulated transient network failure")
+        result = (taxi.inspect_schema(path, year_month), taxi.validate_month(path, year_month))
+        slices[requested_year_month] = result
+        return result
+
+    monkeypatch.setattr(taxi, "run_validation_slice", fake_run_validation_slice)
+
+    results = taxi.acquire_and_validate_year(["2019-01", "2019-02", "2019-03"])
+
+    assert [r.year_month for r in results] == ["2019-01", "2019-02", "2019-03"]
+    assert results[0].profile is slices["2019-01"][0]
+    assert results[0].report is slices["2019-01"][1]
+    assert results[2].profile is slices["2019-03"][0]
+    assert results[2].report is slices["2019-03"][1]
+    failed = results[1]
+    assert failed.profile is None
+    failure_issue = issue(failed.report, "acquisition_failed")
+    assert failure_issue.severity.value == "error"
+    assert "2019-02" in failure_issue.message
+
+
+def test_acquire_and_validate_year_isolates_schema_drift(monkeypatch, fixture_month, tmp_path):
+    """A month where a required column (e.g. tpep_pickup_datetime) has drifted to a
+    non-timestamp type raises SchemaDriftError from inspect_schema — that must be isolated
+    per-month like any other acquisition failure, not abort the whole run."""
+    path, year_month = fixture_month
+
+    drifted_df = pd.DataFrame(
+        [dict(tpep_pickup_datetime="2019-02-01", tpep_dropoff_datetime="2019-02-01", **VALID_ROW)]
+    )
+    drifted_path = tmp_path / "drifted.parquet"
+    drifted_df.to_parquet(drifted_path, engine="pyarrow", index=False)
+
+    def fake_run_validation_slice(requested_year_month: str = "2019-01"):
+        if requested_year_month == "2019-02":
+            return taxi.inspect_schema(drifted_path, requested_year_month), taxi.validate_month(
+                drifted_path, requested_year_month
+            )
         return taxi.inspect_schema(path, year_month), taxi.validate_month(path, year_month)
 
     monkeypatch.setattr(taxi, "run_validation_slice", fake_run_validation_slice)

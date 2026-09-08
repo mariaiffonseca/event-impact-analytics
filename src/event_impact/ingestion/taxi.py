@@ -55,6 +55,14 @@ OPTIONAL_DIAGNOSTIC_COLUMNS = ["congestion_surcharge", "airport_fee"]
 YEAR_MONTHS_2019 = [f"2019-{month:02d}" for month in range(1, 13)]
 
 
+class SchemaDriftError(Exception):
+    """Raised when a month's Parquet file has a required column present but of an
+    unexpected type (e.g. `tpep_pickup_datetime` stored as something other than a
+    timestamp). Distinct from `TypeError` so `acquire_and_validate_year()` can treat this
+    specific, known failure mode as an isolated per-month finding without having to catch
+    `TypeError` broadly (which would also mask genuine programming bugs)."""
+
+
 def raw_path_for(year_month: str) -> Path:
     return TAXI_RAW_DIR / f"yellow_tripdata_{year_month}.parquet"
 
@@ -96,7 +104,7 @@ def inspect_schema(path: Path, year_month: str) -> TaxiSliceProfile:
         # Distinguishes real schema drift (a future month storing this column as a
         # non-timestamp type) from the expected naive-timestamp case, which also has
         # `.tz is None` — see docs/project/03_DATA_ACQUISITION.md's schema-drift risk.
-        raise TypeError(
+        raise SchemaDriftError(
             f"expected tpep_pickup_datetime to be a timestamp column, got "
             f"{pickup_field.type!r} in {year_month} ({path})"
         )
@@ -272,6 +280,9 @@ def validate_month(path: Path, year_month: str) -> ValidationReport:
     params.append(str(path))
 
     row = con.execute(f"SELECT {', '.join(select_parts)} FROM read_parquet(?)", params).fetchone()
+    # Fails loudly (rather than silently mis-slicing) if a future edit changes `select_parts`
+    # without updating `checks`/`present_optional_columns` to match.
+    assert len(row) == 1 + len(checks) + len(present_optional_columns)
     total = row[0]
     counts = dict(zip((c[0] for c in checks), row[1 : 1 + len(checks)], strict=True))
     optional_null_counts = dict(zip(present_optional_columns, row[1 + len(checks) :], strict=True))
@@ -300,7 +311,7 @@ def validate_month(path: Path, year_month: str) -> ValidationReport:
     )
 
     for column in OPTIONAL_DIAGNOSTIC_COLUMNS:
-        if column not in columns:
+        if column not in present_optional_columns:
             report.add(
                 f"optional_column_absent:{column}",
                 Severity.INFO,
@@ -310,7 +321,7 @@ def validate_month(path: Path, year_month: str) -> ValidationReport:
         check_count(
             report,
             f"optional_column_null:{column}",
-            optional_null_counts[column],
+            optional_null_counts[column] or 0,
             total=total,
             ok_message=f"{column} present with no nulls",
             problem_message=f"{column} present but null for some rows",
@@ -369,12 +380,13 @@ def acquire_and_validate_year(year_months: list[str] | None = None) -> list[Mont
     to silently drop the month from the results. This also covers failures `run_validation_slice`
     doesn't itself turn into a clean result — e.g. `download_file` exhausting its retries on a
     transient network failure or a TLC outage (`requests.RequestException`, a subclass of
-    `OSError`), a disk error writing the file (`OSError`), or a corrupt/truncated downloaded
-    file that fails to parse (`pyarrow`'s `ArrowException` or a `duckdb.Error` from querying
-    it) — by catching those and recording the failure as an ERROR-severity issue for that
-    month instead of aborting the whole run. A logic error (e.g. `TypeError`, `KeyError`) is
-    deliberately not caught here — it should fail loudly rather than being reported as a
-    per-month data problem.
+    `OSError`), a disk error writing the file (`OSError`), a corrupt/truncated downloaded file
+    that fails to parse (`pyarrow`'s `ArrowException` or a `duckdb.Error` from querying it), or
+    a required column present under an unexpected type (`SchemaDriftError`, raised by
+    `inspect_schema`) — by catching those and recording the failure as an ERROR-severity issue
+    for that month instead of aborting the whole run. A logic error (e.g. bare `TypeError`,
+    `KeyError`) is deliberately not caught here — it should fail loudly rather than being
+    reported as a per-month data problem.
     """
     if year_months is None:
         year_months = YEAR_MONTHS_2019
@@ -382,9 +394,9 @@ def acquire_and_validate_year(year_months: list[str] | None = None) -> list[Mont
     for year_month in year_months:
         try:
             profile, report = run_validation_slice(year_month)
-        except (OSError, duckdb.Error, pa.lib.ArrowException) as exc:
+        except (OSError, duckdb.Error, pa.lib.ArrowException, SchemaDriftError) as exc:
             profile = None
-            report = ValidationReport(source=f"taxi:{year_month}")
+            report = ValidationReport(source=f"taxi:{raw_path_for(year_month).name}")
             report.add(
                 "acquisition_failed",
                 Severity.ERROR,
@@ -434,9 +446,10 @@ if __name__ == "__main__":
                 print(month_result.profile)
             print(month_result.report.summary())
             print()
-        total_rows = sum(r.profile.row_count for r in year_results if r.profile is not None)
-        total_bytes = sum(r.profile.file_size_bytes for r in year_results if r.profile is not None)
-        succeeded = sum(1 for r in year_results if r.profile is not None)
+        successful_months = [r for r in year_results if r.profile is not None]
+        total_rows = sum(r.profile.row_count for r in successful_months)
+        total_bytes = sum(r.profile.file_size_bytes for r in successful_months)
+        succeeded = len(successful_months)
         print(
             f"TOTAL: {total_rows:,} rows across {succeeded} of {len(year_results)} months "
             f"({total_bytes:,} bytes)"
