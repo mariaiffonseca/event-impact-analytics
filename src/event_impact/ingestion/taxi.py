@@ -1,10 +1,12 @@
 """NYC TLC Yellow Taxi trip data — acquisition and source validation.
 
 PR-003 acquired and validated a single-month slice (2019-01) to establish the real schema,
-coverage, and data-quality profile. PR-004 reuses `download_month()` / `inspect_schema()`
-unchanged, extends `validate_month()` with an optional-column diagnostic (see
-`OPTIONAL_DIAGNOSTIC_COLUMNS`), and applies both once per month to acquire and validate the
-full 2019 calendar year (`acquire_and_validate_year()` / `aggregate_issue_counts()` below).
+coverage, and data-quality profile. PR-004 reuses `download_month()` unchanged, extends
+`validate_month()` with an optional-column diagnostic (see `OPTIONAL_DIAGNOSTIC_COLUMNS`)
+and an early schema-drift check shared with `inspect_schema()` (see
+`_require_pickup_timestamp_type()`), and applies both once per month to acquire and validate
+the full 2019 calendar year (`acquire_and_validate_year()` / `aggregate_issue_counts()`
+below).
 
 All inspection is done via PyArrow Parquet metadata and DuckDB querying the Parquet file
 directly — the file is never loaded into memory as a whole (no `pandas.read_parquet()`), and
@@ -67,6 +69,22 @@ def raw_path_for(year_month: str) -> Path:
     return TAXI_RAW_DIR / f"yellow_tripdata_{year_month}.parquet"
 
 
+def _require_pickup_timestamp_type(path: Path, year_month: str) -> None:
+    """Raise SchemaDriftError if tpep_pickup_datetime is present but not stored as a
+    timestamp type. Distinguishes real schema drift (a future month storing this column as a
+    non-timestamp type) from the expected naive-timestamp case, which also has `.tz is None`
+    — see docs/project/03_DATA_ACQUISITION.md's schema-drift risk. Checked via Parquet
+    metadata only (no full scan); callers must run this before any row-level DuckDB query
+    touches the column, which would otherwise fail with an opaque duckdb.BinderException on
+    real drift instead of this dedicated, isolatable error."""
+    pickup_field = pq.ParquetFile(path).schema_arrow.field("tpep_pickup_datetime")
+    if not pa.types.is_timestamp(pickup_field.type):
+        raise SchemaDriftError(
+            f"expected tpep_pickup_datetime to be a timestamp column, got "
+            f"{pickup_field.type!r} in {year_month} ({path})"
+        )
+
+
 def download_month(year_month: str) -> Path:
     """Download one month of trip data (e.g. '2019-01') to data/raw/taxi/, with provenance."""
     dest = raw_path_for(year_month)
@@ -99,16 +117,8 @@ def inspect_schema(path: Path, year_month: str) -> TaxiSliceProfile:
     row_count = parquet_file.metadata.num_rows
     file_size_bytes = path.stat().st_size
 
-    pickup_field = parquet_file.schema_arrow.field("tpep_pickup_datetime")
-    if not pa.types.is_timestamp(pickup_field.type):
-        # Distinguishes real schema drift (a future month storing this column as a
-        # non-timestamp type) from the expected naive-timestamp case, which also has
-        # `.tz is None` — see docs/project/03_DATA_ACQUISITION.md's schema-drift risk.
-        raise SchemaDriftError(
-            f"expected tpep_pickup_datetime to be a timestamp column, got "
-            f"{pickup_field.type!r} in {year_month} ({path})"
-        )
-    pickup_tz = pickup_field.type.tz
+    _require_pickup_timestamp_type(path, year_month)
+    pickup_tz = parquet_file.schema_arrow.field("tpep_pickup_datetime").type.tz
 
     con = duckdb.connect()
     coverage = con.execute(
@@ -147,7 +157,13 @@ def inspect_schema(path: Path, year_month: str) -> TaxiSliceProfile:
 def validate_month(path: Path, year_month: str) -> ValidationReport:
     """Source-quality validation over the Parquet file, entirely via DuckDB queries against
     the file on disk (no full in-memory load). This is validation only — no cleaning,
-    imputation, or record removal happens here."""
+    imputation, or record removal happens here.
+
+    Raises SchemaDriftError if tpep_pickup_datetime is present but not a timestamp type —
+    checked before any row-level query below touches it, so real drift fails with this
+    specific, isolatable error instead of an opaque duckdb.BinderException from those
+    queries.
+    """
     report = ValidationReport(source=f"taxi:{path.name}")
 
     columns = pq.ParquetFile(path).schema.names
@@ -157,18 +173,21 @@ def validate_month(path: Path, year_month: str) -> ValidationReport:
         # against an incompatible schema would raise a SQL binder error instead of a
         # meaningful validation result, so stop here and report the missing-column error.
         return report
+    _require_pickup_timestamp_type(path, year_month)
 
     con = duckdb.connect()
     lo, hi = _PLAUSIBLE_LOCATION_ID_RANGE
 
     # (check_name, SQL condition, params for that condition, ok_message, problem_message,
     # severity). Conditions and their params are combined into a single query below via
-    # `sum(CASE WHEN ... THEN 1 ELSE 0 END)` — along with a null-count term per present
-    # optional diagnostic column (see `present_optional_columns` below) — so the 7.7M-row
-    # file is scanned once for all of these checks (plus one more scan for `duplicate_rows`,
-    # which needs whole-row DISTINCT) instead of once per check. `read_parquet(?)` and the
-    # `?` placeholders below are bound positionally by DuckDB in the order they appear in the
-    # query text — see the query assembly loop, which relies on that ordering.
+    # `sum(CASE WHEN ... THEN 1 ELSE 0 END)` so the 7.7M-row file is scanned once for all of
+    # these checks (plus one more scan for `duplicate_rows`, which needs whole-row DISTINCT)
+    # instead of once per check. A null-count check per present optional diagnostic column
+    # (see `present_optional_columns` below) is appended to this same list further down, so
+    # it's folded into that one batched query too rather than requiring its own scan(s).
+    # `read_parquet(?)` and the `?` placeholders below are bound positionally by DuckDB in the
+    # order they appear in the query text — see the query assembly loop, which relies on that
+    # ordering.
     checks: list[tuple[str, str, list[object], str, str, Severity]] = [
         (
             "null_or_invalid_pu_location_id",
@@ -269,23 +288,34 @@ def validate_month(path: Path, year_month: str) -> ValidationReport:
     ]
 
     present_optional_columns = [c for c in OPTIONAL_DIAGNOSTIC_COLUMNS if c in columns]
+    checks.extend(
+        (
+            f"optional_column_null:{column}",
+            f"{column} IS NULL",
+            [],
+            f"{column} present with no nulls",
+            f"{column} present but null for some rows",
+            Severity.INFO,
+        )
+        for column in present_optional_columns
+    )
 
     select_parts = ["count(*) AS total"]
     params: list[object] = []
     for name, condition, condition_params, *_ in checks:
-        select_parts.append(f"sum(CASE WHEN {condition} THEN 1 ELSE 0 END) AS {name}")
+        # Double-quoted alias: unlike the original required-column check names, an
+        # `optional_column_null:<column>` name contains a colon, which isn't valid in a bare
+        # SQL identifier.
+        select_parts.append(f'sum(CASE WHEN {condition} THEN 1 ELSE 0 END) AS "{name}"')
         params.extend(condition_params)
-    for column in present_optional_columns:
-        select_parts.append(f"sum(CASE WHEN {column} IS NULL THEN 1 ELSE 0 END) AS {column}")
     params.append(str(path))
 
     row = con.execute(f"SELECT {', '.join(select_parts)} FROM read_parquet(?)", params).fetchone()
-    # Fails loudly (rather than silently mis-slicing) if a future edit changes `select_parts`
-    # without updating `checks`/`present_optional_columns` to match.
-    assert len(row) == 1 + len(checks) + len(present_optional_columns)
     total = row[0]
-    counts = dict(zip((c[0] for c in checks), row[1 : 1 + len(checks)], strict=True))
-    optional_null_counts = dict(zip(present_optional_columns, row[1 + len(checks) :], strict=True))
+    # zip(strict=True) fails loudly (rather than silently mis-pairing) if a future edit
+    # changes `select_parts` without updating `checks` to match — a real runtime check, not
+    # an `assert`, so it isn't stripped under `python -O`/`PYTHONOPTIMIZE`.
+    counts = dict(zip((c[0] for c in checks), row[1:], strict=True))
 
     for name, _condition, _condition_params, ok_message, problem_message, severity in checks:
         check_count(
@@ -312,21 +342,15 @@ def validate_month(path: Path, year_month: str) -> ValidationReport:
 
     for column in OPTIONAL_DIAGNOSTIC_COLUMNS:
         if column not in present_optional_columns:
+            # count=1 (not the default None) so aggregate_issue_counts sums this as "number
+            # of months this column was absent" instead of falling through its no-count
+            # INFO/WARNING default of 0, which would be indistinguishable from "never absent".
             report.add(
                 f"optional_column_absent:{column}",
                 Severity.INFO,
                 f"{column} is not present in this month's schema",
+                count=1,
             )
-            continue
-        check_count(
-            report,
-            f"optional_column_null:{column}",
-            optional_null_counts[column] or 0,
-            total=total,
-            ok_message=f"{column} present with no nulls",
-            problem_message=f"{column} present but null for some rows",
-            severity=Severity.INFO,
-        )
 
     return report
 

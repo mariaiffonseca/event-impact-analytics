@@ -1,3 +1,5 @@
+from pathlib import Path
+
 import pandas as pd
 import pytest
 
@@ -136,6 +138,54 @@ def test_validate_month_rejects_schema_missing_required_columns(tmp_path):
     assert len(report.issues) == 1
 
 
+def test_validate_month_raises_schema_drift_error_for_non_timestamp_pickup(tmp_path):
+    """A pickup column stored as a non-timestamp type must raise SchemaDriftError from
+    validate_month itself, before its row-level DuckDB queries run — those queries reference
+    tpep_pickup_datetime via date_diff/date_trunc and would otherwise fail with an opaque
+    duckdb.BinderException instead of this dedicated, isolatable error."""
+    df = pd.DataFrame(
+        [
+            dict(
+                tpep_pickup_datetime="2019-01-05 08:00:00",
+                tpep_dropoff_datetime="2019-01-05 08:20:00",
+                **VALID_ROW,
+            )
+        ]
+    )
+    df["tpep_dropoff_datetime"] = pd.to_datetime(df["tpep_dropoff_datetime"])
+    # tpep_pickup_datetime deliberately left as a plain string column (drifted type).
+    path = tmp_path / "drifted.parquet"
+    df.to_parquet(path, engine="pyarrow", index=False)
+
+    with pytest.raises(taxi.SchemaDriftError):
+        taxi.validate_month(path, "2019-01")
+
+
+def _write_taxi_month(year_month: str, *, drift_pickup: bool = False) -> Path:
+    """Write a minimal valid (or, if drift_pickup, schema-drifted) month file plus provenance
+    sidecar directly to raw_path_for(year_month) — for tests exercising the real
+    run_validation_slice()/acquire_and_validate_year() integration end to end, not a mock of
+    it. Caller must monkeypatch taxi.TAXI_RAW_DIR first."""
+    path = taxi.raw_path_for(year_month)
+    df = pd.DataFrame(
+        [
+            dict(
+                tpep_pickup_datetime="2019-01-05 08:00:00",
+                tpep_dropoff_datetime="2019-01-05 08:20:00",
+                **VALID_ROW,
+            )
+        ]
+    )
+    if not drift_pickup:
+        df["tpep_pickup_datetime"] = pd.to_datetime(df["tpep_pickup_datetime"])
+    df["tpep_dropoff_datetime"] = pd.to_datetime(df["tpep_dropoff_datetime"])
+    df.to_parquet(path, engine="pyarrow", index=False)
+    write_provenance(
+        DownloadResult(url="https://example.test", dest_path=path, size_bytes=1, sha256="x")
+    )
+    return path
+
+
 def test_run_validation_slice_reports_missing_schema_without_crashing(tmp_path, monkeypatch):
     """inspect_schema assumes required columns are present and raises a raw KeyError on a
     bad schema; run_validation_slice must check the schema first and route to the clean
@@ -254,6 +304,9 @@ def test_validate_month_flags_optional_columns_absent_when_missing(fixture_month
     for column in taxi.OPTIONAL_DIAGNOSTIC_COLUMNS:
         absent_issue = issue(report, f"optional_column_absent:{column}")
         assert absent_issue.severity.value == "info"
+        # count=1, not None: must be distinguishable from a check that ran and found no
+        # problem (which also has no explicit count) when aggregated across months.
+        assert absent_issue.count == 1
 
 
 def test_validate_month_reports_optional_column_nulls_when_present(tmp_path):
@@ -352,26 +405,17 @@ def test_acquire_and_validate_year_isolates_month_failures(monkeypatch, fixture_
     assert "2019-02" in failure_issue.message
 
 
-def test_acquire_and_validate_year_isolates_schema_drift(monkeypatch, fixture_month, tmp_path):
-    """A month where a required column (e.g. tpep_pickup_datetime) has drifted to a
-    non-timestamp type raises SchemaDriftError from inspect_schema — that must be isolated
-    per-month like any other acquisition failure, not abort the whole run."""
-    path, year_month = fixture_month
-
-    drifted_df = pd.DataFrame(
-        [dict(tpep_pickup_datetime="2019-02-01", tpep_dropoff_datetime="2019-02-01", **VALID_ROW)]
-    )
-    drifted_path = tmp_path / "drifted.parquet"
-    drifted_df.to_parquet(drifted_path, engine="pyarrow", index=False)
-
-    def fake_run_validation_slice(requested_year_month: str = "2019-01"):
-        if requested_year_month == "2019-02":
-            return taxi.inspect_schema(drifted_path, requested_year_month), taxi.validate_month(
-                drifted_path, requested_year_month
-            )
-        return taxi.inspect_schema(path, year_month), taxi.validate_month(path, year_month)
-
-    monkeypatch.setattr(taxi, "run_validation_slice", fake_run_validation_slice)
+def test_acquire_and_validate_year_isolates_schema_drift(monkeypatch, tmp_path):
+    """A month where tpep_pickup_datetime has drifted to a non-timestamp type must be
+    isolated per-month like any other acquisition failure, not abort the whole run. Exercises
+    the real run_validation_slice() end to end (not a stand-in for it): the previous version
+    of this test mocked inspect_schema/validate_month in the reverse of their real call
+    order, which never actually verified the drift check fires before the row-level queries
+    that would otherwise raise an opaque duckdb.BinderException instead."""
+    monkeypatch.setattr(taxi, "TAXI_RAW_DIR", tmp_path)
+    _write_taxi_month("2019-01")
+    _write_taxi_month("2019-02", drift_pickup=True)
+    _write_taxi_month("2019-03")
 
     results = taxi.acquire_and_validate_year(["2019-01", "2019-02", "2019-03"])
 
@@ -383,6 +427,39 @@ def test_acquire_and_validate_year_isolates_schema_drift(monkeypatch, fixture_mo
     failure_issue = issue(failed.report, "acquisition_failed")
     assert failure_issue.severity.value == "error"
     assert "2019-02" in failure_issue.message
+
+
+def test_acquire_and_validate_year_passes_through_clean_schema_failure(monkeypatch, tmp_path):
+    """A month with a genuinely missing required column makes run_validation_slice return
+    (None, report) without raising — acquire_and_validate_year must pass that straight
+    through as the real MonthResult(profile=None, report=<that report>), not re-wrap it via
+    the except branch's generic acquisition_failed the way a raised exception is handled.
+    Exercises the real orchestrator end to end, not a mock of run_validation_slice."""
+    monkeypatch.setattr(taxi, "TAXI_RAW_DIR", tmp_path)
+    _write_taxi_month("2019-01")
+    _write_taxi_month("2019-03")
+    bad_schema_path = taxi.raw_path_for("2019-02")
+    pd.DataFrame({"tpep_pickup_datetime": pd.to_datetime(["2019-02-01"])}).to_parquet(
+        bad_schema_path, engine="pyarrow", index=False
+    )
+    write_provenance(
+        DownloadResult(
+            url="https://example.test", dest_path=bad_schema_path, size_bytes=1, sha256="x"
+        )
+    )
+
+    results = taxi.acquire_and_validate_year(["2019-01", "2019-02", "2019-03"])
+
+    assert [r.year_month for r in results] == ["2019-01", "2019-02", "2019-03"]
+    assert results[0].profile is not None
+    assert results[2].profile is not None
+    failed = results[1]
+    assert failed.profile is None
+    required_columns_issue = issue(failed.report, "required_columns")
+    assert required_columns_issue.severity.value == "error"
+    # The real validate_month report, passed straight through — not re-wrapped as a generic
+    # acquisition_failed, which would mean the except branch fired for a non-exception path.
+    assert not any(i.check == "acquisition_failed" for i in failed.report.issues)
 
 
 def test_acquire_and_validate_year_default_covers_all_twelve_months(monkeypatch, fixture_month):
@@ -463,3 +540,37 @@ def test_aggregate_issue_counts_sums_across_months():
     assert totals["dropoff_before_pickup"] == 5
     # An issue with no count (info, no problem found) contributes 0, not a missing key.
     assert totals["required_columns"] == 0
+
+
+def test_aggregate_issue_counts_distinguishes_absent_optional_column_from_never_absent():
+    """optional_column_absent:<column> issues carry an explicit count=1 (see validate_month)
+    so they sum here as "number of months this column was absent" — indistinguishable from
+    "never absent" (both 0) if that count were left unset like a normal no-problem-found
+    INFO issue."""
+
+    def make_report(*, absent: bool) -> taxi.ValidationReport:
+        report = taxi.ValidationReport(source="test")
+        if absent:
+            report.add(
+                "optional_column_absent:congestion_surcharge",
+                taxi.Severity.INFO,
+                "congestion_surcharge is not present in this month's schema",
+                count=1,
+            )
+        else:
+            report.add(
+                "optional_column_null:congestion_surcharge",
+                taxi.Severity.INFO,
+                "congestion_surcharge present with no nulls",
+            )
+        return report
+
+    results = [
+        taxi.MonthResult(year_month="2019-01", profile=None, report=make_report(absent=True)),
+        taxi.MonthResult(year_month="2019-02", profile=None, report=make_report(absent=True)),
+        taxi.MonthResult(year_month="2019-03", profile=None, report=make_report(absent=False)),
+    ]
+
+    totals = taxi.aggregate_issue_counts(results)
+
+    assert totals["optional_column_absent:congestion_surcharge"] == 2
