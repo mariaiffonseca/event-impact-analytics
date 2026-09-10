@@ -1,12 +1,16 @@
 """NYC TLC Yellow Taxi trip data — acquisition and source validation.
 
-PR-003 scope: acquire and validate a single-month slice (2019-01) to establish the real
-schema, coverage, and data-quality profile before committing to a full-year acquisition
-strategy. Downloading and validating the remaining 11 months is PR-004's job, reusing the
-functions here.
+PR-003 acquired and validated a single-month slice (2019-01) to establish the real schema,
+coverage, and data-quality profile. PR-004 reuses `download_month()` unchanged, extends
+`validate_month()` with an optional-column diagnostic (see `OPTIONAL_DIAGNOSTIC_COLUMNS`)
+and an early schema-drift check shared with `inspect_schema()` (see
+`_require_pickup_timestamp_type()`), and applies both once per month to acquire and validate
+the full 2019 calendar year (`acquire_and_validate_year()` / `aggregate_issue_counts()`
+below).
 
 All inspection is done via PyArrow Parquet metadata and DuckDB querying the Parquet file
-directly — the file is never loaded into memory as a whole (no `pandas.read_parquet()`).
+directly — the file is never loaded into memory as a whole (no `pandas.read_parquet()`), and
+each month is validated independently (no 12-month in-memory concat).
 """
 
 from __future__ import annotations
@@ -46,9 +50,39 @@ REQUIRED_COLUMNS = [
 # lookup table happens in PR-005 once that data is acquired.
 _PLAUSIBLE_LOCATION_ID_RANGE = (1, 265)
 
+# Confirmed present in 2019-01 but not guaranteed for every month (see PR-003's
+# 03_DATA_ACQUISITION.md) — reported as an informational diagnostic, not a hard requirement.
+OPTIONAL_DIAGNOSTIC_COLUMNS = ["congestion_surcharge", "airport_fee"]
+
+YEAR_MONTHS_2019 = [f"2019-{month:02d}" for month in range(1, 13)]
+
+
+class SchemaDriftError(Exception):
+    """Raised when a month's Parquet file has a required column present but of an
+    unexpected type (e.g. `tpep_pickup_datetime` stored as something other than a
+    timestamp). Distinct from `TypeError` so `acquire_and_validate_year()` can treat this
+    specific, known failure mode as an isolated per-month finding without having to catch
+    `TypeError` broadly (which would also mask genuine programming bugs)."""
+
 
 def raw_path_for(year_month: str) -> Path:
     return TAXI_RAW_DIR / f"yellow_tripdata_{year_month}.parquet"
+
+
+def _require_pickup_timestamp_type(path: Path, year_month: str) -> None:
+    """Raise SchemaDriftError if tpep_pickup_datetime is present but not stored as a
+    timestamp type. Distinguishes real schema drift (a future month storing this column as a
+    non-timestamp type) from the expected naive-timestamp case, which also has `.tz is None`
+    — see docs/project/03_DATA_ACQUISITION.md's schema-drift risk. Checked via Parquet
+    metadata only (no full scan); callers must run this before any row-level DuckDB query
+    touches the column, which would otherwise fail with an opaque duckdb.BinderException on
+    real drift instead of this dedicated, isolatable error."""
+    pickup_field = pq.ParquetFile(path).schema_arrow.field("tpep_pickup_datetime")
+    if not pa.types.is_timestamp(pickup_field.type):
+        raise SchemaDriftError(
+            f"expected tpep_pickup_datetime to be a timestamp column, got "
+            f"{pickup_field.type!r} in {year_month} ({path})"
+        )
 
 
 def download_month(year_month: str) -> Path:
@@ -83,16 +117,8 @@ def inspect_schema(path: Path, year_month: str) -> TaxiSliceProfile:
     row_count = parquet_file.metadata.num_rows
     file_size_bytes = path.stat().st_size
 
-    pickup_field = parquet_file.schema_arrow.field("tpep_pickup_datetime")
-    if not pa.types.is_timestamp(pickup_field.type):
-        # Distinguishes real schema drift (a future month storing this column as a
-        # non-timestamp type) from the expected naive-timestamp case, which also has
-        # `.tz is None` — see docs/project/03_DATA_ACQUISITION.md's schema-drift risk.
-        raise TypeError(
-            f"expected tpep_pickup_datetime to be a timestamp column, got "
-            f"{pickup_field.type!r} in {year_month} ({path})"
-        )
-    pickup_tz = pickup_field.type.tz
+    _require_pickup_timestamp_type(path, year_month)
+    pickup_tz = parquet_file.schema_arrow.field("tpep_pickup_datetime").type.tz
 
     con = duckdb.connect()
     coverage = con.execute(
@@ -131,7 +157,13 @@ def inspect_schema(path: Path, year_month: str) -> TaxiSliceProfile:
 def validate_month(path: Path, year_month: str) -> ValidationReport:
     """Source-quality validation over the Parquet file, entirely via DuckDB queries against
     the file on disk (no full in-memory load). This is validation only — no cleaning,
-    imputation, or record removal happens here."""
+    imputation, or record removal happens here.
+
+    Raises SchemaDriftError if tpep_pickup_datetime is present but not a timestamp type —
+    checked before any row-level query below touches it, so real drift fails with this
+    specific, isolatable error instead of an opaque duckdb.BinderException from those
+    queries.
+    """
     report = ValidationReport(source=f"taxi:{path.name}")
 
     columns = pq.ParquetFile(path).schema.names
@@ -141,6 +173,7 @@ def validate_month(path: Path, year_month: str) -> ValidationReport:
         # against an incompatible schema would raise a SQL binder error instead of a
         # meaningful validation result, so stop here and report the missing-column error.
         return report
+    _require_pickup_timestamp_type(path, year_month)
 
     con = duckdb.connect()
     lo, hi = _PLAUSIBLE_LOCATION_ID_RANGE
@@ -149,9 +182,12 @@ def validate_month(path: Path, year_month: str) -> ValidationReport:
     # severity). Conditions and their params are combined into a single query below via
     # `sum(CASE WHEN ... THEN 1 ELSE 0 END)` so the 7.7M-row file is scanned once for all of
     # these checks (plus one more scan for `duplicate_rows`, which needs whole-row DISTINCT)
-    # instead of once per check. `read_parquet(?)` and the `?` placeholders below are bound
-    # positionally by DuckDB in the order they appear in the query text — see the query
-    # assembly loop, which relies on that ordering.
+    # instead of once per check. A null-count check per present optional diagnostic column
+    # (see `present_optional_columns` below) is appended to this same list further down, so
+    # it's folded into that one batched query too rather than requiring its own scan(s).
+    # `read_parquet(?)` and the `?` placeholders below are bound positionally by DuckDB in the
+    # order they appear in the query text — see the query assembly loop, which relies on that
+    # ordering.
     checks: list[tuple[str, str, list[object], str, str, Severity]] = [
         (
             "null_or_invalid_pu_location_id",
@@ -251,15 +287,34 @@ def validate_month(path: Path, year_month: str) -> ValidationReport:
         ),
     ]
 
+    present_optional_columns = [c for c in OPTIONAL_DIAGNOSTIC_COLUMNS if c in columns]
+    checks.extend(
+        (
+            f"optional_column_null:{column}",
+            f"{column} IS NULL",
+            [],
+            f"{column} present with no nulls",
+            f"{column} present but null for some rows",
+            Severity.INFO,
+        )
+        for column in present_optional_columns
+    )
+
     select_parts = ["count(*) AS total"]
     params: list[object] = []
     for name, condition, condition_params, *_ in checks:
-        select_parts.append(f"sum(CASE WHEN {condition} THEN 1 ELSE 0 END) AS {name}")
+        # Double-quoted alias: unlike the original required-column check names, an
+        # `optional_column_null:<column>` name contains a colon, which isn't valid in a bare
+        # SQL identifier.
+        select_parts.append(f'sum(CASE WHEN {condition} THEN 1 ELSE 0 END) AS "{name}"')
         params.extend(condition_params)
     params.append(str(path))
 
     row = con.execute(f"SELECT {', '.join(select_parts)} FROM read_parquet(?)", params).fetchone()
     total = row[0]
+    # zip(strict=True) fails loudly (rather than silently mis-pairing) if a future edit
+    # changes `select_parts` without updating `checks` to match — a real runtime check, not
+    # an `assert`, so it isn't stripped under `python -O`/`PYTHONOPTIMIZE`.
     counts = dict(zip((c[0] for c in checks), row[1:], strict=True))
 
     for name, _condition, _condition_params, ok_message, problem_message, severity in checks:
@@ -284,6 +339,18 @@ def validate_month(path: Path, year_month: str) -> ValidationReport:
         ok_message="no exact duplicate rows",
         problem_message="exact duplicate rows",
     )
+
+    for column in OPTIONAL_DIAGNOSTIC_COLUMNS:
+        if column not in present_optional_columns:
+            # count=1 (not the default None) so aggregate_issue_counts sums this as "number
+            # of months this column was absent" instead of falling through its no-count
+            # INFO/WARNING default of 0, which would be indistinguishable from "never absent".
+            report.add(
+                f"optional_column_absent:{column}",
+                Severity.INFO,
+                f"{column} is not present in this month's schema",
+                count=1,
+            )
 
     return report
 
@@ -322,9 +389,99 @@ def run_validation_slice(
     return profile, report
 
 
+@dataclass
+class MonthResult:
+    year_month: str
+    profile: TaxiSliceProfile | None
+    report: ValidationReport
+
+
+def acquire_and_validate_year(year_months: list[str] | None = None) -> list[MonthResult]:
+    """Download (if needed) and validate every month in `year_months`, independently.
+
+    No month's failure stops the others — if a month can't be downloaded or its schema is
+    invalid, that's itself a finding to document (see `03_DATA_ACQUISITION.md`), not a reason
+    to silently drop the month from the results. This also covers failures `run_validation_slice`
+    doesn't itself turn into a clean result — e.g. `download_file` exhausting its retries on a
+    transient network failure or a TLC outage (`requests.RequestException`, a subclass of
+    `OSError`), a disk error writing the file (`OSError`), a corrupt/truncated downloaded file
+    that fails to parse (`pyarrow`'s `ArrowException` or a `duckdb.Error` from querying it), or
+    a required column present under an unexpected type (`SchemaDriftError`, raised by
+    `inspect_schema`) — by catching those and recording the failure as an ERROR-severity issue
+    for that month instead of aborting the whole run. A logic error (e.g. bare `TypeError`,
+    `KeyError`) is deliberately not caught here — it should fail loudly rather than being
+    reported as a per-month data problem.
+    """
+    if year_months is None:
+        year_months = YEAR_MONTHS_2019
+    results = []
+    for year_month in year_months:
+        try:
+            profile, report = run_validation_slice(year_month)
+        except (OSError, duckdb.Error, pa.lib.ArrowException, SchemaDriftError) as exc:
+            profile = None
+            report = ValidationReport(source=f"taxi:{raw_path_for(year_month).name}")
+            report.add(
+                "acquisition_failed",
+                Severity.ERROR,
+                f"failed to download or validate {year_month}: {exc}",
+            )
+        results.append(MonthResult(year_month=year_month, profile=profile, report=report))
+    return results
+
+
+def aggregate_issue_counts(results: list[MonthResult]) -> dict[str, int]:
+    """Sum each check's row count across all months.
+
+    A check with no explicit count contributes 0 only when it's INFO/WARNING severity, i.e. it
+    ran and found no problem. An ERROR-severity issue with no count — `required_columns` on a
+    schema failure, or `acquisition_failed` — means the check never ran at all for that month,
+    which must not be indistinguishable from "ran cleanly"; it contributes 1 per affected month
+    instead, so the aggregate always shows *something* nonzero for it.
+    """
+    totals: dict[str, int] = {}
+    for result in results:
+        for issue in result.report.issues:
+            if issue.count is not None:
+                contribution = issue.count
+            elif issue.severity == Severity.ERROR:
+                contribution = 1
+            else:
+                contribution = 0
+            totals[issue.check] = totals.get(issue.check, 0) + contribution
+    return totals
+
+
 if __name__ == "__main__":
-    profile, report = run_validation_slice()
-    if profile is not None:
-        print(profile)
-        print()
-    print(report.summary())
+    import argparse
+
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "--full-year",
+        action="store_true",
+        help="Acquire and validate all 12 months of 2019 instead of just the 2019-01 slice.",
+    )
+    args = parser.parse_args()
+
+    if args.full_year:
+        year_results = acquire_and_validate_year()
+        for month_result in year_results:
+            if month_result.profile is not None:
+                print(month_result.profile)
+            print(month_result.report.summary())
+            print()
+        successful_months = [r for r in year_results if r.profile is not None]
+        total_rows = sum(r.profile.row_count for r in successful_months)
+        total_bytes = sum(r.profile.file_size_bytes for r in successful_months)
+        succeeded = len(successful_months)
+        print(
+            f"TOTAL: {total_rows:,} rows across {succeeded} of {len(year_results)} months "
+            f"({total_bytes:,} bytes)"
+        )
+        print(f"Aggregate issue counts: {aggregate_issue_counts(year_results)}")
+    else:
+        slice_profile, slice_report = run_validation_slice()
+        if slice_profile is not None:
+            print(slice_profile)
+            print()
+        print(slice_report.summary())
